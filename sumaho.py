@@ -1,16 +1,18 @@
 import csv
 import io
 import json
+import math
 import re
 import urllib.parse
 import urllib.request
 import folium
+import numpy as np
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
 # ==========================================
-# 1. Web API 住所・施設検索部
+# 1. Web API 住所・施設検索部 ＆ 距離計算部
 # ==========================================
 
 
@@ -77,6 +79,28 @@ def parse_lat_lon_pair(val1, val2=None):
       return n1, n2
   except Exception:
     return None, None
+
+
+def calculate_haversine_matrix(spots):
+  """
+  全地点間の球面大円距離(メートル)行列をPython内部で爆速計算。
+  200件〜1000件でも一瞬で完了し、OSRMの通信上限エラーを回避する。
+  """
+  lats = np.radians([s['lat'] for s in spots])
+  lons = np.radians([s['lon'] for s in spots])
+
+  dlat = lats[:, np.newaxis] - lats[np.newaxis, :]
+  dlon = lons[:, np.newaxis] - lons[np.newaxis, :]
+
+  a = (
+      np.sin(dlat / 2.0) ** 2
+      + np.cos(lats[:, np.newaxis])
+      * np.cos(lats[np.newaxis, :])
+      * np.sin(dlon / 2.0) ** 2
+  )
+  c = 2 * np.arcsin(np.sqrt(a))
+  r = 6371000.0  # 地球の平均半径(メートル)
+  return c * r
 
 
 def extract_gdrive_file_id(url):
@@ -261,34 +285,43 @@ def parse_bytes_content(content, filename_hint=''):
 
 
 # ==========================================
-# 2. OSRM API ＆ TSP計算部
+# 2. OSRM API ＆ TSP計算部 (分割問い合わせ対応)
 # ==========================================
 
 
-def get_osrm_matrix(spots):
-  coords_str = ';'.join(f"{s['lon']},{s['lat']}" for s in spots)
-  url = f'https://router.project-osrm.org/table/v1/driving/{coords_str}?annotations=duration'
-  req = urllib.request.Request(
-      url, headers={'User-Agent': 'TSP-OSRM-App-Agent'}
-  )
-  with urllib.request.urlopen(req, timeout=15) as response:
-    data = json.loads(response.read().decode())
-  if 'durations' not in data:
-    raise Exception('OSRMから移動時間のデータを取得できませんでした。')
-  return data['durations']
+def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=40):
+  """
+  確定した巡回ルートを40〜50地点ごとの小分けにしてOSRM Route APIに問い合わせる。
+  これにより、200件〜500件の大規模データでもOSRMのURL長制限エラー(400 Bad Request)を完全回避！
+  """
+  total_spots = len(ordered_spots)
+  all_coordinates = []
 
+  idx = 0
+  while idx < total_spots - 1:
+    end_idx = min(idx + max_chunk, total_spots - 1)
+    sub_spots = ordered_spots[idx : end_idx + 1]
 
-def get_osrm_route_geometry(ordered_spots):
-  coords_str = ';'.join(f"{s['lon']},{s['lat']}" for s in ordered_spots)
-  url = f'https://router.project-osrm.org/route/v1/driving/{coords_str}?overview=full&geometries=geojson'
-  req = urllib.request.Request(
-      url, headers={'User-Agent': 'TSP-OSRM-App-Agent'}
-  )
-  with urllib.request.urlopen(req, timeout=15) as response:
-    data = json.loads(response.read().decode())
-  if 'routes' not in data or len(data['routes']) == 0:
-    raise Exception('OSRMから走行ルートの形状を取得できませんでした。')
-  return data['routes'][0]['geometry']['coordinates']
+    coords_str = ';'.join(f"{s['lon']},{s['lat']}" for s in sub_spots)
+    url = f'https://router.project-osrm.org/route/v1/driving/{coords_str}?overview=full&geometries=geojson'
+
+    req = urllib.request.Request(
+        url, headers={'User-Agent': 'TSP-OSRM-App-Agent'}
+    )
+    with urllib.request.urlopen(req, timeout=15) as response:
+      data = json.loads(response.read().decode())
+
+    if 'routes' in data and len(data['routes']) > 0:
+      sub_coords = data['routes'][0]['geometry']['coordinates']
+      if all_coordinates:
+        # つなぎ目の重複座標を除外して滑らかに連結
+        all_coordinates.extend(sub_coords[1:])
+      else:
+        all_coordinates.extend(sub_coords)
+
+    idx = end_idx
+
+  return all_coordinates
 
 
 def solve_tsp(duration_matrix, is_round_trip=True):
@@ -307,7 +340,10 @@ def solve_tsp(duration_matrix, is_round_trip=True):
     tour.append(0)
 
     improved = True
-    while improved:
+    # 200件以上の場合、高速化のため2-optのループ上限を設定
+    limit = 10000 if n < 150 else 1000
+    count = 0
+    while improved and count < limit:
       improved = False
       for i in range(1, n - 1):
         for j in range(i + 1, n):
@@ -322,6 +358,7 @@ def solve_tsp(duration_matrix, is_round_trip=True):
           if new_cost < current_cost - 1e-3:
             tour[i : j + 1] = reversed(tour[i : j + 1])
             improved = True
+            count += 1
             break
         if improved:
           break
@@ -340,7 +377,9 @@ def solve_tsp(duration_matrix, is_round_trip=True):
     tour.append(n - 1)
 
     improved = True
-    while improved:
+    limit = 10000 if n < 150 else 1000
+    count = 0
+    while improved and count < limit:
       improved = False
       for i in range(1, n - 2):
         for j in range(i + 1, n - 1):
@@ -355,6 +394,7 @@ def solve_tsp(duration_matrix, is_round_trip=True):
           if new_cost < current_cost - 1e-3:
             tour[i : j + 1] = reversed(tour[i : j + 1])
             improved = True
+            count += 1
             break
         if improved:
           break
@@ -388,25 +428,22 @@ def generate_google_maps_urls(ordered_spots, max_waypoints=9):
 
 
 # ==========================================
-# 3. Streamlit WEB GUI 部（スマホ対応デザイン）
+# 3. Streamlit WEB GUI 部
 # ==========================================
 
 st.set_page_config(
     page_title='現場向け TSPルート作成', page_icon='🚚', layout='wide'
 )
 
-# 📱 スマホ画面表示用のカスタムCSS（パディング削減・ボタン拡大）
 st.markdown(
     """
 <style>
-    /* 画面幅いっぱいにコンテンツを広げる */
     .block-container {
         padding-top: 1rem !important;
         padding-bottom: 2rem !important;
         padding-left: 0.5rem !important;
         padding-right: 0.5rem !important;
     }
-    /* ボタンを太く・押しやすく（おっちゃんの指用） */
     div.stButton > button {
         width: 100%;
         border-radius: 8px;
@@ -414,7 +451,6 @@ st.markdown(
         padding-bottom: 0.6rem;
         font-weight: bold;
     }
-    /* タイトルの見やすさ調整 */
     h1 {
         font-size: 1.5rem !important;
         padding-bottom: 0.5rem;
@@ -426,7 +462,6 @@ st.markdown(
 
 st.title('🚚 現場向け 最短ルート作成 ＆ Google Maps生成')
 
-# --- Widget State の初期化 ---
 if 'input_start' not in st.session_state:
   st.session_state['input_start'] = '35.9655, 140.2942'
 if 'input_end' not in st.session_state:
@@ -437,7 +472,6 @@ if 'map_zoom' not in st.session_state:
   st.session_state['map_zoom'] = 10
 
 
-# --- コールバック関数群 ---
 def set_start_from_center():
   if 'last_dragged_center' in st.session_state:
     st.session_state['map_center'] = st.session_state['last_dragged_center']
@@ -526,7 +560,6 @@ if file_bytes:
 st.markdown('---')
 st.subheader('📍 出発地・終点地（ゴール）の設定')
 
-# A. 住所・施設名検索（スマホで潰れないように2列配置）
 st.text_input(
     '🔍 住所・施設名から検索',
     placeholder='例: 東京都千代田区丸の内1-9-1 または 東京タワー',
@@ -548,7 +581,6 @@ with col_a2:
 
 st.write('')
 
-# B. 出発地入力 ＆ 地図中心セットボタン
 st.text_input('📍 出発地 (lat, lon)', key='input_start')
 st.button(
     '📍 地図中心（✚）を出発地にセット',
@@ -558,7 +590,6 @@ st.button(
 
 st.write('')
 
-# C. 終点地入力 ＆ 地図中心セットボタン
 st.text_input(
     '🏁 終点地 (lat, lon ※空欄で戻る)', key='input_end'
 )
@@ -581,7 +612,6 @@ m_input = folium.Map(
     zoom_start=st.session_state['map_zoom'],
 )
 
-# 中央固定の赤十字（✚）オーバーレイ
 crosshair_html = """
 <div style="
     position: absolute;
@@ -604,7 +634,6 @@ crosshair_html = """
 """
 m_input.get_root().html.add_child(folium.Element(crosshair_html))
 
-# プレビュー表示
 for s in preview_spots:
   folium.Marker(
       [s['lat'], s['lon']],
@@ -629,7 +658,6 @@ if e_lat and e_lon:
       icon=folium.Icon(color='green', icon='flag'),
   ).add_to(m_input)
 
-# スマホ向けに地図の高さ(height)を 380px に最適化
 map_output = st_folium(
     m_input,
     key='select_map',
@@ -680,10 +708,18 @@ if st.button(
           end_spot = {'lon': e_lon, 'lat': e_lat, 'name': '指定された終点地'}
           calc_spots = [start_spot] + raw_spots + [end_spot]
 
-        duration_matrix = get_osrm_matrix(calc_spots)
-        tour = solve_tsp(duration_matrix, is_round_trip=is_round_trip)
+        # 【魔改造】1. 距離行列を内部計算（Haversine大円距離）で爆速取得！
+        dist_matrix = calculate_haversine_matrix(calc_spots)
+
+        # 【魔改造】2. 超爆速TSP計算（2-opt）
+        tour = solve_tsp(dist_matrix, is_round_trip=is_round_trip)
         ordered_spots = [calc_spots[idx] for idx in tour]
-        detailed_route = get_osrm_route_geometry(ordered_spots)
+
+        # 【魔改造】3. OSRMへの問い合わせを40〜50地点ごとの小分け（チャンク）にして道路形状を取得！
+        detailed_route = get_osrm_route_geometry_chunked(
+            ordered_spots, max_chunk=40
+        )
+
         urls_info = generate_google_maps_urls(ordered_spots, max_waypoints=9)
 
         st.session_state['result'] = {
