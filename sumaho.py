@@ -5,10 +5,10 @@ import re
 import urllib.parse
 import urllib.request
 import folium
+from folium.plugins import LocateControl
 import numpy as np
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from streamlit_folium import st_folium
 
 # ==========================================
@@ -299,8 +299,8 @@ def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=40):
   all_coordinates = []
 
   idx = 0
-  while idx < total_pts - 1 if (total_pts := len(ordered_spots)) else 0:
-    end_idx = min(idx + max_chunk, total_pts - 1)
+  while idx < total_spots - 1:
+    end_idx = min(idx + max_chunk, total_spots - 1)
     sub_spots = ordered_spots[idx : end_idx + 1]
 
     coords_str = ';'.join(f"{s['lon']},{s['lat']}" for s in sub_spots)
@@ -499,19 +499,6 @@ st.markdown(
 
 st.title('🚚 現場向け 最短ルート作成 ＆ Google Maps生成')
 
-# --- スマホ現在地(GPS)受信処理 ---
-query_params = st.query_params
-if 'gps_lat' in query_params and 'gps_lon' in query_params:
-  g_lat = float(query_params['gps_lat'])
-  g_lon = float(query_params['gps_lon'])
-  st.session_state['input_start'] = f'{g_lat:.6f}, {g_lon:.6f}'
-  st.session_state['map_center'] = (g_lat, g_lon)
-  st.session_state['map_zoom'] = 16
-  st.session_state['last_dragged_center'] = (g_lat, g_lon)
-  st.session_state['last_dragged_zoom'] = 16
-  st.query_params.clear()  # URLを綺麗にクリア！
-  st.toast('📍 スマホの現在地を出発地にセットしました！')
-
 # --- Widget State の初期化 ---
 if 'input_start' not in st.session_state:
   st.session_state['input_start'] = '35.9655, 140.2942'
@@ -612,51 +599,6 @@ if file_bytes:
 st.markdown('---')
 st.subheader('📍 出発地・終点地（ゴール）の設定')
 
-# スマホのGPS現在地取得コンポーネント（ワンタップで現在地を出発地にセット！）
-st.markdown('**📱 スマホのGPSで現在地を取得**')
-components.html(
-    """
-<button id="gps_btn" style="
-    width: 100%;
-    background-color: #0288d1;
-    color: white;
-    font-weight: bold;
-    border: none;
-    border-radius: 8px;
-    padding: 0.7rem;
-    font-size: 1rem;
-    cursor: pointer;
-    box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-">📱 現在地(GPS)を取得して出発地にセット</button>
-<script>
-document.getElementById('gps_btn').addEventListener('click', function() {
-    if (navigator.geolocation) {
-        document.getElementById('gps_btn').innerText = "📍 GPS現在地を取得中...";
-        navigator.geolocation.getCurrentPosition(function(position) {
-            var lat = position.coords.latitude;
-            var lon = position.coords.longitude;
-            var url = new URL(window.parent.location.href);
-            url.searchParams.set('gps_lat', lat);
-            url.searchParams.set('gps_lon', lon);
-            window.parent.location.href = url.href;
-        }, function(error) {
-            alert("現在地の取得に失敗しました。スマホの位置情報(GPS)利用を許可してください。");
-            document.getElementById('gps_btn').innerText = "📱 現在地(GPS)を取得して出発地にセット";
-        }, {
-            enableHighAccuracy: true,
-            timeout: 10000
-        });
-    } else {
-        alert("お使いのブラウザは位置情報(GPS)に対応していません。");
-    }
-});
-</script>
-""",
-    height=60,
-)
-
-st.write('')
-
 # A. 住所・施設名検索
 st.text_input(
     '🔍 住所・施設名から検索',
@@ -692,16 +634,16 @@ st.write('')
 # C. 終点地入力 ＆ 地図中心セットボタン
 st.text_input('🏁 終点地 (lat, lon ※空欄で戻る)', key='input_end')
 st.button(
-    '🏁 地図中心（✚）を終点地にセット',
+    '🏁 終点地に（✚）をセット',
     on_click=set_end_from_center,
     use_container_width=True,
 )
 
 st.caption(
-    '💡 使い方: 上の「GPSボタン」を押すか、住所検索・地図ドラッグ（✚）でセットしてください。'
+    '💡 使い方: 地図左上の「🎯（GPSマーク）」を押すと現在地に自動移動します。中央の赤十字（✚）を合わせてセットボタンを押してください。'
 )
 
-# --- 地図描画 ---
+# --- 地図描画（Folium公式LocateControlでスマホGPSボタンを地図上に直接埋め込み！） ---
 s_lat, s_lon = parse_lat_lon_pair(st.session_state['input_start'])
 e_lat, e_lon = parse_lat_lon_pair(st.session_state['input_end'])
 
@@ -710,6 +652,15 @@ m_input = folium.Map(
     zoom_start=st.session_state['map_zoom'],
 )
 
+# GPS現在地ボタン（LocateControl）を地図左上に埋め込み！
+LocateControl(
+    auto_start=False,
+    flyTo=True,
+    keepCurrentZoomLevel=False,
+    strings={'title': 'GPS現在地を表示'},
+).add_to(m_input)
+
+# 中央固定の赤十字（✚）オーバーレイ
 crosshair_html = """
 <div style="
     position: absolute;
@@ -732,6 +683,7 @@ crosshair_html = """
 """
 m_input.get_root().html.add_child(folium.Element(crosshair_html))
 
+# プレビュー表示
 for s in preview_spots:
   folium.Marker(
       [s['lat'], s['lon']],
