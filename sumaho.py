@@ -8,6 +8,7 @@ import folium
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_folium import st_folium
 
 # ==========================================
@@ -122,7 +123,6 @@ def download_from_gdrive(file_id):
 
 
 def parse_dataframe_to_spots(df):
-  """DataFrameから元の全行データ(raw_dict)を保持しつつスポット化"""
   header = [str(c).strip() for c in df.columns]
   name_idx, latlon_idx, lat_idx, lon_idx = -1, -1, -1, -1
 
@@ -299,8 +299,8 @@ def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=40):
   all_coordinates = []
 
   idx = 0
-  while idx < total_spots - 1:
-    end_idx = min(idx + max_chunk, total_spots - 1)
+  while idx < total_pts - 1 if (total_pts := len(ordered_spots)) else 0:
+    end_idx = min(idx + max_chunk, total_pts - 1)
     sub_spots = ordered_spots[idx : end_idx + 1]
 
     coords_str = ';'.join(f"{s['lon']},{s['lat']}" for s in sub_spots)
@@ -427,7 +427,6 @@ def generate_google_maps_urls(ordered_spots, max_waypoints=9):
 
 
 def create_export_dataframe(res):
-  """最適化順に並び替えた出力用 DataFrame を生成（元データカラムも全統合）"""
   tour = res['tour']
   calc_spots = res['calc_spots']
   is_round_trip = res['is_round_trip']
@@ -500,6 +499,20 @@ st.markdown(
 
 st.title('🚚 現場向け 最短ルート作成 ＆ Google Maps生成')
 
+# --- スマホ現在地(GPS)受信処理 ---
+query_params = st.query_params
+if 'gps_lat' in query_params and 'gps_lon' in query_params:
+  g_lat = float(query_params['gps_lat'])
+  g_lon = float(query_params['gps_lon'])
+  st.session_state['input_start'] = f'{g_lat:.6f}, {g_lon:.6f}'
+  st.session_state['map_center'] = (g_lat, g_lon)
+  st.session_state['map_zoom'] = 16
+  st.session_state['last_dragged_center'] = (g_lat, g_lon)
+  st.session_state['last_dragged_zoom'] = 16
+  st.query_params.clear()  # URLを綺麗にクリア！
+  st.toast('📍 スマホの現在地を出発地にセットしました！')
+
+# --- Widget State の初期化 ---
 if 'input_start' not in st.session_state:
   st.session_state['input_start'] = '35.9655, 140.2942'
 if 'input_end' not in st.session_state:
@@ -510,6 +523,7 @@ if 'map_zoom' not in st.session_state:
   st.session_state['map_zoom'] = 10
 
 
+# --- コールバック関数群 ---
 def set_start_from_center():
   if 'last_dragged_center' in st.session_state:
     st.session_state['map_center'] = st.session_state['last_dragged_center']
@@ -598,6 +612,52 @@ if file_bytes:
 st.markdown('---')
 st.subheader('📍 出発地・終点地（ゴール）の設定')
 
+# スマホのGPS現在地取得コンポーネント（ワンタップで現在地を出発地にセット！）
+st.markdown('**📱 スマホのGPSで現在地を取得**')
+components.html(
+    """
+<button id="gps_btn" style="
+    width: 100%;
+    background-color: #0288d1;
+    color: white;
+    font-weight: bold;
+    border: none;
+    border-radius: 8px;
+    padding: 0.7rem;
+    font-size: 1rem;
+    cursor: pointer;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+">📱 現在地(GPS)を取得して出発地にセット</button>
+<script>
+document.getElementById('gps_btn').addEventListener('click', function() {
+    if (navigator.geolocation) {
+        document.getElementById('gps_btn').innerText = "📍 GPS現在地を取得中...";
+        navigator.geolocation.getCurrentPosition(function(position) {
+            var lat = position.coords.latitude;
+            var lon = position.coords.longitude;
+            var url = new URL(window.parent.location.href);
+            url.searchParams.set('gps_lat', lat);
+            url.searchParams.set('gps_lon', lon);
+            window.parent.location.href = url.href;
+        }, function(error) {
+            alert("現在地の取得に失敗しました。スマホの位置情報(GPS)利用を許可してください。");
+            document.getElementById('gps_btn').innerText = "📱 現在地(GPS)を取得して出発地にセット";
+        }, {
+            enableHighAccuracy: true,
+            timeout: 10000
+        });
+    } else {
+        alert("お使いのブラウザは位置情報(GPS)に対応していません。");
+    }
+});
+</script>
+""",
+    height=60,
+)
+
+st.write('')
+
+# A. 住所・施設名検索
 st.text_input(
     '🔍 住所・施設名から検索',
     placeholder='例: 東京都千代田区丸の内1-9-1 または 東京タワー',
@@ -619,6 +679,7 @@ with col_a2:
 
 st.write('')
 
+# B. 出発地入力 ＆ 地図中心セットボタン
 st.text_input('📍 出発地 (lat, lon)', key='input_start')
 st.button(
     '📍 地図中心（✚）を出発地にセット',
@@ -628,6 +689,7 @@ st.button(
 
 st.write('')
 
+# C. 終点地入力 ＆ 地図中心セットボタン
 st.text_input('🏁 終点地 (lat, lon ※空欄で戻る)', key='input_end')
 st.button(
     '🏁 地図中心（✚）を終点地にセット',
@@ -636,8 +698,7 @@ st.button(
 )
 
 st.caption(
-    '💡 使い方:'
-    ' 上で住所検索するか、地図を指で動かして中央の赤十字（✚）を合わせ、セットボタンを押してください。'
+    '💡 使い方: 上の「GPSボタン」を押すか、住所検索・地図ドラッグ（✚）でセットしてください。'
 )
 
 # --- 地図描画 ---
@@ -771,7 +832,6 @@ if 'result' in st.session_state:
   res = st.session_state['result']
   mode_text = '【周回】' if res['is_round_trip'] else '【片道】'
 
-  # A. 並び替え済みリストのダウンロード機能！
   st.markdown('---')
   st.subheader('📄 並び替え済みリストのダウンロード')
   st.caption(
@@ -780,11 +840,9 @@ if 'result' in st.session_state:
 
   df_export = create_export_dataframe(res)
 
-  # データフレームの事前プレビュー（上位5件）
   with st.expander('👀 並び替え後のデータプレビューを表示', expanded=False):
     st.dataframe(df_export.head(10), use_container_width=True)
 
-  # CSV & Excel のバイトデータ生成
   csv_data = df_export.to_csv(index=False, encoding='utf-8-sig').encode(
       'utf-8-sig'
   )
@@ -794,7 +852,6 @@ if 'result' in st.session_state:
     df_export.to_excel(writer, index=False, sheet_name='最適ルート一覧')
   excel_data = excel_buffer.getvalue()
 
-  # スマホ用 2列ダウンロードボタン
   col_dl1, col_dl2 = st.columns(2)
   with col_dl1:
     st.download_button(
@@ -813,7 +870,6 @@ if 'result' in st.session_state:
         use_container_width=True,
     )
 
-  # B. Google Maps ナビリンク
   st.markdown('---')
   st.subheader(f'🔗 Google Maps URL {mode_text}')
 
@@ -826,7 +882,6 @@ if 'result' in st.session_state:
     )
     st.write('')
 
-  # C. 最適化マップ
   st.markdown('---')
   st.subheader('🗺️ 最適化ルートマップ')
 
