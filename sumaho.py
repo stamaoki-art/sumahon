@@ -1,7 +1,6 @@
 import csv
 import io
 import json
-import math
 import re
 import urllib.parse
 import urllib.request
@@ -82,10 +81,7 @@ def parse_lat_lon_pair(val1, val2=None):
 
 
 def calculate_haversine_matrix(spots):
-  """
-  全地点間の球面大円距離(メートル)行列をPython内部で爆速計算。
-  200件〜1000件でも一瞬で完了し、OSRMの通信上限エラーを回避する。
-  """
+  """全地点間の球面大円距離(メートル)行列をPython内部で爆速計算"""
   lats = np.radians([s['lat'] for s in spots])
   lons = np.radians([s['lon'] for s in spots])
 
@@ -99,7 +95,7 @@ def calculate_haversine_matrix(spots):
       * np.sin(dlon / 2.0) ** 2
   )
   c = 2 * np.arcsin(np.sqrt(a))
-  r = 6371000.0  # 地球の平均半径(メートル)
+  r = 6371000.0
   return c * r
 
 
@@ -126,6 +122,7 @@ def download_from_gdrive(file_id):
 
 
 def parse_dataframe_to_spots(df):
+  """DataFrameから元の全行データ(raw_dict)を保持しつつスポット化"""
   header = [str(c).strip() for c in df.columns]
   name_idx, latlon_idx, lat_idx, lon_idx = -1, -1, -1, -1
 
@@ -156,6 +153,7 @@ def parse_dataframe_to_spots(df):
 
   spots = []
   for row_num, row_data in enumerate(df.itertuples(index=False), start=2):
+    row_dict = dict(zip(header, row_data))
     row = [str(val) if pd.notna(val) else '' for val in row_data]
     if not row or all(c.strip() == '' for c in row):
       continue
@@ -183,7 +181,9 @@ def parse_dataframe_to_spots(df):
           break
 
     if lat is not None and lon is not None:
-      spots.append({'lon': lon, 'lat': lat, 'name': name})
+      spots.append(
+          {'lon': lon, 'lat': lat, 'name': name, 'raw_dict': row_dict}
+      )
 
   return spots
 
@@ -235,15 +235,19 @@ def parse_bytes_content(content, filename_hint=''):
         )
 
         if g_type == 'Point':
-          spots.append(
-              {'lon': float(coords[0]), 'lat': float(coords[1]), 'name': name}
-          )
+          spots.append({
+              'lon': float(coords[0]),
+              'lat': float(coords[1]),
+              'name': name,
+              'raw_dict': props,
+          })
         elif g_type in ['MultiPoint', 'LineString']:
           for i, pt in enumerate(coords):
             spots.append({
                 'lon': float(pt[0]),
                 'lat': float(pt[1]),
                 'name': f'{name}_{i}',
+                'raw_dict': props,
             })
         elif g_type in ['Polygon']:
           for i, pt in enumerate(coords[0]):
@@ -251,6 +255,7 @@ def parse_bytes_content(content, filename_hint=''):
                 'lon': float(pt[0]),
                 'lat': float(pt[1]),
                 'name': f'{name}_{i}',
+                'raw_dict': props,
             })
 
       if geojson_data.get('type') == 'FeatureCollection':
@@ -285,15 +290,11 @@ def parse_bytes_content(content, filename_hint=''):
 
 
 # ==========================================
-# 2. OSRM API ＆ TSP計算部 (分割問い合わせ対応)
+# 2. OSRM API ＆ TSP計算部
 # ==========================================
 
 
 def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=40):
-  """
-  確定した巡回ルートを40〜50地点ごとの小分けにしてOSRM Route APIに問い合わせる。
-  これにより、200件〜500件の大規模データでもOSRMのURL長制限エラー(400 Bad Request)を完全回避！
-  """
   total_spots = len(ordered_spots)
   all_coordinates = []
 
@@ -314,7 +315,6 @@ def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=40):
     if 'routes' in data and len(data['routes']) > 0:
       sub_coords = data['routes'][0]['geometry']['coordinates']
       if all_coordinates:
-        # つなぎ目の重複座標を除外して滑らかに連結
         all_coordinates.extend(sub_coords[1:])
       else:
         all_coordinates.extend(sub_coords)
@@ -340,7 +340,6 @@ def solve_tsp(duration_matrix, is_round_trip=True):
     tour.append(0)
 
     improved = True
-    # 200件以上の場合、高速化のため2-optのループ上限を設定
     limit = 10000 if n < 150 else 1000
     count = 0
     while improved and count < limit:
@@ -427,6 +426,45 @@ def generate_google_maps_urls(ordered_spots, max_waypoints=9):
   return urls_info
 
 
+def create_export_dataframe(res):
+  """最適化順に並び替えた出力用 DataFrame を生成（元データカラムも全統合）"""
+  tour = res['tour']
+  calc_spots = res['calc_spots']
+  is_round_trip = res['is_round_trip']
+  total_len = len(tour)
+
+  export_rows = []
+  for order, idx in enumerate(tour):
+    if is_round_trip and order == total_len - 1:
+      continue
+
+    spot = calc_spots[idx]
+    raw = spot.get('raw_dict', {})
+
+    if order == 0:
+      visit_label = '出発地'
+    elif not is_round_trip and order == total_len - 1:
+      visit_label = '終点地'
+    else:
+      visit_label = f'立ち寄り_{order}'
+
+    row_data = {
+        '訪問順': order,
+        '区分': visit_label,
+        '名称/識別ID': spot['name'],
+        '緯度': spot['lat'],
+        '経度': spot['lon'],
+    }
+
+    for k, v in raw.items():
+      if k not in row_data:
+        row_data[k] = v
+
+    export_rows.append(row_data)
+
+  return pd.DataFrame(export_rows)
+
+
 # ==========================================
 # 3. Streamlit WEB GUI 部
 # ==========================================
@@ -444,7 +482,7 @@ st.markdown(
         padding-left: 0.5rem !important;
         padding-right: 0.5rem !important;
     }
-    div.stButton > button {
+    div.stButton > button, div.stDownloadButton > button {
         width: 100%;
         border-radius: 8px;
         padding-top: 0.6rem;
@@ -590,9 +628,7 @@ st.button(
 
 st.write('')
 
-st.text_input(
-    '🏁 終点地 (lat, lon ※空欄で戻る)', key='input_end'
-)
+st.text_input('🏁 終点地 (lat, lon ※空欄で戻る)', key='input_end')
 st.button(
     '🏁 地図中心（✚）を終点地にセット',
     on_click=set_end_from_center,
@@ -600,7 +636,8 @@ st.button(
 )
 
 st.caption(
-    '💡 使い方: 上で住所検索するか、地図を指で動かして中央の赤十字（✚）を合わせ、セットボタンを押してください。'
+    '💡 使い方:'
+    ' 上で住所検索するか、地図を指で動かして中央の赤十字（✚）を合わせ、セットボタンを押してください。'
 )
 
 # --- 地図描画 ---
@@ -708,18 +745,12 @@ if st.button(
           end_spot = {'lon': e_lon, 'lat': e_lat, 'name': '指定された終点地'}
           calc_spots = [start_spot] + raw_spots + [end_spot]
 
-        # 【魔改造】1. 距離行列を内部計算（Haversine大円距離）で爆速取得！
         dist_matrix = calculate_haversine_matrix(calc_spots)
-
-        # 【魔改造】2. 超爆速TSP計算（2-opt）
         tour = solve_tsp(dist_matrix, is_round_trip=is_round_trip)
         ordered_spots = [calc_spots[idx] for idx in tour]
-
-        # 【魔改造】3. OSRMへの問い合わせを40〜50地点ごとの小分け（チャンク）にして道路形状を取得！
         detailed_route = get_osrm_route_geometry_chunked(
             ordered_spots, max_chunk=40
         )
-
         urls_info = generate_google_maps_urls(ordered_spots, max_waypoints=9)
 
         st.session_state['result'] = {
@@ -735,11 +766,54 @@ if st.button(
       except Exception as e:
         st.error(f'計算エラー: {e}')
 
-# --- 4. 結果表示 ---
+# --- 4. 結果表示 ＆ ダウンロードエリア ---
 if 'result' in st.session_state:
   res = st.session_state['result']
   mode_text = '【周回】' if res['is_round_trip'] else '【片道】'
 
+  # A. 並び替え済みリストのダウンロード機能！
+  st.markdown('---')
+  st.subheader('📄 並び替え済みリストのダウンロード')
+  st.caption(
+      '元データの全情報（管理番号、住所、作業内容など）に『訪問順』を付与して最適順に並び替えたファイルです。'
+  )
+
+  df_export = create_export_dataframe(res)
+
+  # データフレームの事前プレビュー（上位5件）
+  with st.expander('👀 並び替え後のデータプレビューを表示', expanded=False):
+    st.dataframe(df_export.head(10), use_container_width=True)
+
+  # CSV & Excel のバイトデータ生成
+  csv_data = df_export.to_csv(index=False, encoding='utf-8-sig').encode(
+      'utf-8-sig'
+  )
+
+  excel_buffer = io.BytesIO()
+  with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+    df_export.to_excel(writer, index=False, sheet_name='最適ルート一覧')
+  excel_data = excel_buffer.getvalue()
+
+  # スマホ用 2列ダウンロードボタン
+  col_dl1, col_dl2 = st.columns(2)
+  with col_dl1:
+    st.download_button(
+        label='📥 並び替え済み CSV をDL',
+        data=csv_data,
+        file_name='optimized_route_list.csv',
+        mime='text/csv',
+        use_container_width=True,
+    )
+  with col_dl2:
+    st.download_button(
+        label='📊 並び替え済み Excel をDL',
+        data=excel_data,
+        file_name='optimized_route_list.xlsx',
+        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        use_container_width=True,
+    )
+
+  # B. Google Maps ナビリンク
   st.markdown('---')
   st.subheader(f'🔗 Google Maps URL {mode_text}')
 
@@ -752,6 +826,7 @@ if 'result' in st.session_state:
     )
     st.write('')
 
+  # C. 最適化マップ
   st.markdown('---')
   st.subheader('🗺️ 最適化ルートマップ')
 
