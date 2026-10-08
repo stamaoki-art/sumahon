@@ -558,7 +558,7 @@ if 'input_end' not in st.session_state:
 if 'map_center' not in st.session_state:
   st.session_state['map_center'] = (36.0, 140.0)
 if 'map_zoom' not in st.session_state:
-  st.session_state['map_zoom'] = 17
+  st.session_state['map_zoom'] = 10
 
 
 # --- コールバック関数群 ---
