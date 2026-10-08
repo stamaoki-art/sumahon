@@ -552,7 +552,7 @@ st.title('🚚 現場向け 最短ルート作成 ＆ Google Maps生成')
 
 # --- Widget State の初期化 ---
 if 'input_start' not in st.session_state:
-  st.session_state['input_start'] = '35.6255, 139.7267'
+  st.session_state['input_start'] = '35.6225, 139.7267'
 if 'input_end' not in st.session_state:
   st.session_state['input_end'] = ''
 if 'map_center' not in st.session_state:
