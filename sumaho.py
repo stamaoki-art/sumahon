@@ -556,7 +556,7 @@ if 'input_start' not in st.session_state:
 if 'input_end' not in st.session_state:
   st.session_state['input_end'] = ''
 if 'map_center' not in st.session_state:
-  st.session_state['map_center'] = (36.622, 139.726)
+  st.session_state['map_center'] = (35.622, 139.726)
 if 'map_zoom' not in st.session_state:
   st.session_state['map_zoom'] = 10
 
