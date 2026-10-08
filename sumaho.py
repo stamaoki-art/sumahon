@@ -123,6 +123,13 @@ def download_from_gdrive(file_id):
 
 
 def parse_dataframe_to_spots(df):
+  """
+  DataFrameからスポット化
+  ★【優先順位強化】
+  1. まず「緯度経度」の結合カラムを最優先で探索
+  2. 無い/失敗した場合は、分かれている「緯度」と「経度」カラムから探す
+  3. それでもダメなら全セル自動ローラー検索
+  """
   header = [str(c).strip() for c in df.columns]
   name_idx, latlon_idx, lat_idx, lon_idx = -1, -1, -1, -1
 
@@ -164,16 +171,22 @@ def parse_dataframe_to_spots(df):
     )
     lat, lon = None, None
 
+    # 1. 優先度高：まとまった「緯度経度」カラムからパース
     if latlon_idx != -1 and latlon_idx < len(row):
       lat, lon = parse_lat_lon_pair(row[latlon_idx])
-    elif (
-        lat_idx != -1
+
+    # 2. 優先度中：「緯度経度」が無い・または取れなかった場合、分かれている「緯度」「経度」カラムからパース
+    if (
+        (lat is None or lon is None)
+        and lat_idx != -1
         and lon_idx != -1
         and lat_idx < len(row)
         and lon_idx < len(row)
     ):
       lat, lon = parse_lat_lon_pair(row[lat_idx], row[lon_idx])
-    else:
+
+    # 3. 優先度低：どちらでも取れなかった場合、全セルローラー検索
+    if lat is None or lon is None:
       for cell in row:
         t_lat, t_lon = parse_lat_lon_pair(cell)
         if t_lat is not None and t_lon is not None:
@@ -558,14 +571,14 @@ def search_and_set_end():
 # --- 1. 読み込み方法の選択 ---
 load_type = st.radio(
     '① データの読み込み方法',
-    ['📁 PCファイルアップロード', '☁️ Google Drive リンク'],
+    ['📁 ファイルアップロード', '☁️ Google Drive リンク'],
     horizontal=True,
 )
 
 file_bytes = None
 file_hint_name = ''
 
-if load_type == '📁 PCファイルアップロード':
+if load_type == '📁 ファイルアップロード':
   uploaded_file = st.file_uploader(
       'Excel / CSV / GeoJSON を選択',
       type=['xlsx', 'xls', 'csv', 'geojson', 'json'],
@@ -640,10 +653,10 @@ st.button(
 )
 
 st.caption(
-    '💡 使い方: 地図左上の「🎯（GPSマーク）」を押すと現在地に自動移動します。中央の赤十字（✚）を合わせてセットボタンを押してください。'
+    '💡 使い方: 地図左上の「🎯（GPSマーク）」を押すと現在地に自動移動します（読み込み完了までお待ちください）中央の赤十字（✚）を合わせてセットボタンを押してください。'
 )
 
-# --- 地図描画（Folium公式LocateControlでスマホGPSボタンを地図上に直接埋め込み！） ---
+# --- 地図描画 ---
 s_lat, s_lon = parse_lat_lon_pair(st.session_state['input_start'])
 e_lat, e_lon = parse_lat_lon_pair(st.session_state['input_end'])
 
