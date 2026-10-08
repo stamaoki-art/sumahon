@@ -609,14 +609,14 @@ def search_and_set_end():
 # --- 1. 読み込み方法の選択 ---
 load_type = st.radio(
     '① データの読み込み方法',
-    ['📁 PCファイルアップロード', '☁️ Google Drive リンク'],
+    ['📁 ファイルアップロード(基本はこちら)', '☁️ Google Drive リンク(PCからドライブ選択用)'],
     horizontal=True,
 )
 
 file_bytes = None
 file_hint_name = ''
 
-if load_type == '📁 PCファイルアップロード':
+if load_type == '📁 ファイルアップロード(基本はこちら)':
   uploaded_file = st.file_uploader(
       'Excel / CSV / GeoJSON を選択',
       type=['xlsx', 'xls', 'csv', 'geojson', 'json'],
