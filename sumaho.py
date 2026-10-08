@@ -12,7 +12,7 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 # ==========================================
-# 1. Web API 住所・施設検索部 ＆ 距離・実道路時間計算部
+# 1. Web API 住所・施設検索部 ＆ 距離計算部
 # ==========================================
 
 
@@ -82,7 +82,7 @@ def parse_lat_lon_pair(val1, val2=None):
 
 
 def calculate_haversine_matrix(spots):
-  """全地点間の球面大円距離(メートル)行列（フォールバック用）"""
+  """全地点間の球面大円距離(メートル)行列"""
   lats = np.radians([s['lat'] for s in spots])
   lons = np.radians([s['lon'] for s in spots])
 
@@ -101,16 +101,10 @@ def calculate_haversine_matrix(spots):
 
 
 def get_osrm_matrix_chunked(spots, chunk_size=30):
-  """
-  【新開発：実道路時間マトリックス抽出エンジン】
-  OSRM Table APIを30地点ごとのブロックに分割し、sources/destinationsパラメータを使って
-  200件以上のデータでも「実道路の走行時間（秒）」行列を全件安全かつ高速に構築！
-  一方通行、川・橋の迂回、道路網の形状を100%反映した補正マトリックスを生成する。
-  """
+  """OSRM Table APIによる実道路移動時間マトリックス抽出"""
   n = len(spots)
   matrix = np.zeros((n, n))
 
-  # 地点インデックスを chunk_size ごとのブロックに分割
   chunks = [
       list(range(i, min(i + chunk_size, n))) for i in range(0, n, chunk_size)
   ]
@@ -118,7 +112,6 @@ def get_osrm_matrix_chunked(spots, chunk_size=30):
   try:
     for src_chunk in chunks:
       for dst_chunk in chunks:
-        # 1回のリクエストに含める地点（重複排除して順序保持）
         combined_indices = list(dict.fromkeys(src_chunk + dst_chunk))
 
         src_local = [combined_indices.index(idx) for idx in src_chunk]
@@ -143,8 +136,7 @@ def get_osrm_matrix_chunked(spots, chunk_size=30):
             for d_j, dst_idx in enumerate(dst_chunk):
               matrix[src_idx, dst_idx] = durations[s_i][d_j]
     return matrix
-  except Exception as e:
-    # 万が一通信エラーが発生した場合は直線距離マトリックスへ安全フォールバック
+  except Exception:
     return calculate_haversine_matrix(spots)
 
 
@@ -171,7 +163,6 @@ def download_from_gdrive(file_id):
 
 
 def parse_dataframe_to_spots(df):
-  """DataFrameからスポット化（「緯度経度」優先 ➔ 「緯度」「経度」フォールバック）"""
   header = [str(c).strip() for c in df.columns]
   name_idx, latlon_idx, lat_idx, lon_idx = -1, -1, -1, -1
 
@@ -213,11 +204,9 @@ def parse_dataframe_to_spots(df):
     )
     lat, lon = None, None
 
-    # 1. 優先度高：「緯度経度」結合列から取得
     if latlon_idx != -1 and latlon_idx < len(row):
       lat, lon = parse_lat_lon_pair(row[latlon_idx])
 
-    # 2. 優先度中：「緯度」「経度」の2列から取得
     if (
         (lat is None or lon is None)
         and lat_idx != -1
@@ -227,7 +216,6 @@ def parse_dataframe_to_spots(df):
     ):
       lat, lon = parse_lat_lon_pair(row[lat_idx], row[lon_idx])
 
-    # 3. 優先度低：全セル自動検索
     if lat is None or lon is None:
       for cell in row:
         t_lat, t_lon = parse_lat_lon_pair(cell)
@@ -345,11 +333,17 @@ def parse_bytes_content(content, filename_hint=''):
 
 
 # ==========================================
-# 2. OSRM API ＆ TSP計算部
+# 2. OSRM API ＆ TSP計算部 (切り返し解禁パラメータ導入)
 # ==========================================
 
 
 def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=40):
+  """
+  ★【切り返し解禁ロジック】
+  URLパラメータに `continue_straight=false` を追加！
+  これにより、立ち寄り先（現場）に到着した時点での「その場での折り返し・Uターン（切り返し）」を許可し、
+  奥の行き止まりやロータリーまで無駄に突っ込んで戻ってくる挙動を完全防除する。
+  """
   total_spots = len(ordered_spots)
   all_coordinates = []
 
@@ -359,7 +353,9 @@ def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=40):
     sub_spots = ordered_spots[idx : end_idx + 1]
 
     coords_str = ';'.join(f"{s['lon']},{s['lat']}" for s in sub_spots)
-    url = f'https://router.project-osrm.org/route/v1/driving/{coords_str}?overview=full&geometries=geojson'
+
+    # continue_straight=false を指定して現場切り返しを許可！
+    url = f'https://router.project-osrm.org/route/v1/driving/{coords_str}?overview=full&geometries=geojson&continue_straight=false'
 
     req = urllib.request.Request(
         url, headers={'User-Agent': 'TSP-OSRM-App-Agent'}
@@ -380,7 +376,6 @@ def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=40):
 
 
 def solve_tsp(duration_matrix, is_round_trip=True):
-  """実道路移動時間（秒）をコスト関数とした2-opt TSP最適化"""
   n = len(duration_matrix)
   if is_round_trip:
     if n <= 2:
@@ -786,7 +781,7 @@ if st.button(
   if not file_bytes:
     st.warning('⚠️ ファイルの指定が必要です。')
   else:
-    with st.spinner('実道路網データ(OSRM)を分析して最適ルートを計算中...'):
+    with st.spinner('切り返し・実道路網を考慮して最適ルートを計算中...'):
       try:
         raw_spots = parse_bytes_content(file_bytes, file_hint_name)
         if not raw_spots:
@@ -809,13 +804,11 @@ if st.button(
           end_spot = {'lon': e_lon, 'lat': e_lat, 'name': '指定された終点地'}
           calc_spots = [start_spot] + raw_spots + [end_spot]
 
-        # ★【実道路網補正エンジン】OSRMブロック分割で全地点の実走行時間(秒)を取得！
         dist_matrix = get_osrm_matrix_chunked(calc_spots, chunk_size=30)
-
-        # 実道路走行時間を評価関数とした最適化
         tour = solve_tsp(dist_matrix, is_round_trip=is_round_trip)
         ordered_spots = [calc_spots[idx] for idx in tour]
 
+        # 切り返し許可(continue_straight=false)で走行ラインを取得！
         detailed_route = get_osrm_route_geometry_chunked(
             ordered_spots, max_chunk=40
         )
