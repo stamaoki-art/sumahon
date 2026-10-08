@@ -333,17 +333,11 @@ def parse_bytes_content(content, filename_hint=''):
 
 
 # ==========================================
-# 2. OSRM API ＆ TSP計算部 (切り返し解禁パラメータ導入)
+# 2. OSRM API ＆ TSP計算部
 # ==========================================
 
 
 def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=40):
-  """
-  ★【切り返し解禁ロジック】
-  URLパラメータに `continue_straight=false` を追加！
-  これにより、立ち寄り先（現場）に到着した時点での「その場での折り返し・Uターン（切り返し）」を許可し、
-  奥の行き止まりやロータリーまで無駄に突っ込んで戻ってくる挙動を完全防除する。
-  """
   total_spots = len(ordered_spots)
   all_coordinates = []
 
@@ -353,8 +347,6 @@ def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=40):
     sub_spots = ordered_spots[idx : end_idx + 1]
 
     coords_str = ';'.join(f"{s['lon']},{s['lat']}" for s in sub_spots)
-
-    # continue_straight=false を指定して現場切り返しを許可！
     url = f'https://router.project-osrm.org/route/v1/driving/{coords_str}?overview=full&geometries=geojson&continue_straight=false'
 
     req = urllib.request.Request(
@@ -556,7 +548,7 @@ if 'input_start' not in st.session_state:
 if 'input_end' not in st.session_state:
   st.session_state['input_end'] = ''
 if 'map_center' not in st.session_state:
-  st.session_state['map_center'] = (35.622, 139.726)
+  st.session_state['map_center'] = (35.6225, 139.7267)
 if 'map_zoom' not in st.session_state:
   st.session_state['map_zoom'] = 10
 
@@ -650,6 +642,7 @@ if file_bytes:
 st.markdown('---')
 st.subheader('📍 出発地・終点地（ゴール）の設定')
 
+# A. 住所・施設名検索
 st.text_input(
     '🔍 住所・施設名から検索',
     placeholder='例: 東京都千代田区丸の内1-9-1 または 東京タワー',
@@ -671,6 +664,7 @@ with col_a2:
 
 st.write('')
 
+# B. 出発地入力 ＆ 地図中心セットボタン
 st.text_input('📍 出発地 (lat, lon)', key='input_start')
 st.button(
     '📍 地図中心（✚）を出発地にセット',
@@ -680,6 +674,7 @@ st.button(
 
 st.write('')
 
+# C. 終点地入力 ＆ 地図中心セットボタン
 st.text_input('🏁 終点地 (lat, lon ※空欄で戻る)', key='input_end')
 st.button(
     '🏁 終点地に（✚）をセット',
@@ -689,18 +684,34 @@ st.button(
 
 st.caption(
     '💡 使い方:'
-    ' 地図左上の「🎯（GPSマーク）」を押すと現在地に自動移動します。中央の赤十字（✚）を合わせてセットボタンを押してください。'
+    ' 地図左上の「🎯（GPSマーク）」を押すと現在地に自動移動します。右上のボタンで「航空写真」にも切り替えられます！'
 )
 
-# --- 地図描画 ---
+# --- 地図描画（標準地図 ＆ 航空写真レイヤー追加） ---
 s_lat, s_lon = parse_lat_lon_pair(st.session_state['input_start'])
 e_lat, e_lon = parse_lat_lon_pair(st.session_state['input_end'])
 
 m_input = folium.Map(
     location=st.session_state['map_center'],
     zoom_start=st.session_state['map_zoom'],
+    tiles=None,  # 標準タイルの自動読み込みをオフにしてレイヤー手動追加
 )
 
+# レイヤー1: 標準地図 (OpenStreetMap)
+folium.TileLayer('OpenStreetMap', name='標準地図').add_to(m_input)
+
+# レイヤー2: 国土地理院 航空写真 (シームレスオルソ)
+folium.TileLayer(
+    tiles='https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg',
+    attr='国土地理院',
+    name='📡 航空写真',
+    max_zoom=18,
+).add_to(m_input)
+
+# 右上のレイヤー切替コントロールを追加！
+folium.LayerControl(position='topright').add_to(m_input)
+
+# GPS現在地ボタン
 LocateControl(
     auto_start=False,
     flyTo=True,
@@ -708,6 +719,7 @@ LocateControl(
     strings={'title': 'GPS現在地を表示'},
 ).add_to(m_input)
 
+# 中央固定の赤十字（✚）オーバーレイ
 crosshair_html = """
 <div style="
     position: absolute;
@@ -730,6 +742,7 @@ crosshair_html = """
 """
 m_input.get_root().html.add_child(folium.Element(crosshair_html))
 
+# プレビュー表示
 for s in preview_spots:
   folium.Marker(
       [s['lat'], s['lon']],
@@ -808,7 +821,6 @@ if st.button(
         tour = solve_tsp(dist_matrix, is_round_trip=is_round_trip)
         ordered_spots = [calc_spots[idx] for idx in tour]
 
-        # 切り返し許可(continue_straight=false)で走行ラインを取得！
         detailed_route = get_osrm_route_geometry_chunked(
             ordered_spots, max_chunk=40
         )
@@ -892,7 +904,17 @@ if 'result' in st.session_state:
       res['ordered_spots']
   )
 
-  m = folium.Map(location=[avg_lat, avg_lon], zoom_start=11)
+  # 結果マップにも航空写真切替を追加！
+  m = folium.Map(location=[avg_lat, avg_lon], zoom_start=11, tiles=None)
+
+  folium.TileLayer('OpenStreetMap', name='標準地図').add_to(m)
+  folium.TileLayer(
+      tiles='https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg',
+      attr='国土地理院',
+      name='📡 航空写真',
+      max_zoom=18,
+  ).add_to(m)
+  folium.LayerControl(position='topright').add_to(m)
 
   route_latlons = [(lat, lon) for lon, lat in res['detailed_route']]
   folium.PolyLine(
