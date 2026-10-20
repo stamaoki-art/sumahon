@@ -34,9 +34,7 @@ def search_address_to_latlon(address_text):
       data = json.loads(response.read().decode())
       if data and len(data) > 0 and 'geometry' in data[0]:
         coords = data[0]['geometry']['coordinates']
-        return round(float(coords[1]), 5), round(
-            float(coords[0]), 5
-        )  # 5桁丸め
+        return round(float(coords[1]), 5), round(float(coords[0]), 5)
   except Exception:
     pass
 
@@ -49,9 +47,7 @@ def search_address_to_latlon(address_text):
     with urllib.request.urlopen(req, timeout=5) as response:
       data = json.loads(response.read().decode())
       if data and len(data) > 0:
-        return round(float(data[0]['lat']), 5), round(
-            float(data[0]['lon']), 5
-        )
+        return round(float(data[0]['lat']), 5), round(float(data[0]['lon']), 5)
   except Exception:
     pass
 
@@ -59,7 +55,7 @@ def search_address_to_latlon(address_text):
 
 
 def parse_lat_lon_pair(val1, val2=None):
-  """単一文字列または2値から緯度経度を安全に取得（小数点以下5桁に丸めてURL長爆発を防止）"""
+  """単一文字列または2値から緯度経度を安全に取得"""
   if val1 is None or str(val1).strip() == '' or str(val1).strip().lower() == 'nan':
     return None, None
   try:
@@ -86,7 +82,7 @@ def parse_lat_lon_pair(val1, val2=None):
 
 
 def calculate_haversine_matrix(spots):
-  """全地点間の球面大円距離(メートル)行列（安全フォールバック用）"""
+  """全地点間の球面大円距離(メートル)行列"""
   lats = np.radians([s['lat'] for s in spots])
   lons = np.radians([s['lon'] for s in spots])
 
@@ -105,7 +101,7 @@ def calculate_haversine_matrix(spots):
 
 
 def get_osrm_matrix_chunked(spots, chunk_size=15):
-  """OSRM Table APIによる実道路移動時間マトリックス抽出（URL文字数安全化）"""
+  """OSRM Table APIによる実道路移動時間マトリックス抽出"""
   n = len(spots)
   matrix = np.zeros((n, n))
 
@@ -346,7 +342,6 @@ def parse_bytes_content(content, filename_hint=''):
 
 
 def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=25):
-  """ルート形状取得（25地点分割＆現場切り返し許可）"""
   total_spots = len(ordered_spots)
   all_coordinates = []
 
@@ -381,7 +376,6 @@ def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=25):
 
 
 def solve_tsp(duration_matrix, is_round_trip=True):
-  """実道路移動時間をコスト関数とした2-opt TSP最適化"""
   n = len(duration_matrix)
   if is_round_trip:
     if n <= 2:
@@ -458,6 +452,11 @@ def solve_tsp(duration_matrix, is_round_trip=True):
 
 
 def generate_google_maps_urls(ordered_spots, max_waypoints=9):
+  """
+  通常URLに加え、現在地を出発地点とするURL（current_loc_url）を生成。
+  double slash (//) を用いることで、出発地をスマホの現在地に固定し、
+  前の現場をスキップして次の目的地へ直行ナビを即座に開始できる。
+  """
   chunk_size = max_waypoints + 1
   urls_info = []
   total_pts = len(ordered_spots)
@@ -467,10 +466,18 @@ def generate_google_maps_urls(ordered_spots, max_waypoints=9):
   while idx < total_pts - 1:
     end_idx = min(idx + chunk_size, total_pts - 1)
     sub_spots = ordered_spots[idx : end_idx + 1]
+
+    # 通常URL (sub_spots[0] を起点とする固定ルート)
     path_coords = '/'.join(
         f"{s['lat']:.5f},{s['lon']:.5f}" for s in sub_spots
     )
     url = f'https://www.google.com/maps/dir/{path_coords}'
+
+    # 現在地発URL (現在地を起点とし、次の訪問先 sub_spots[1:] へ向かう)
+    next_spots_coords = '/'.join(
+        f"{s['lat']:.5f},{s['lon']:.5f}" for s in sub_spots[1:]
+    )
+    current_loc_url = f'https://www.google.com/maps/dir//{next_spots_coords}'
 
     urls_info.append({
         'part': part,
@@ -478,6 +485,7 @@ def generate_google_maps_urls(ordered_spots, max_waypoints=9):
         'start': sub_spots[0]['name'],
         'end': sub_spots[-1]['name'],
         'url': url,
+        'current_loc_url': current_loc_url,
     })
     idx = end_idx
     part += 1
@@ -560,7 +568,7 @@ st.title('🚚 現場向け 最短ルート作成 ＆ Google Maps生成')
 
 # --- Widget State の初期化 ---
 if 'input_start' not in st.session_state:
-  st.session_state['input_start'] = '35.6222, 139.7269'
+  st.session_state['input_start'] = '35.96550, 140.29420'
 if 'input_end' not in st.session_state:
   st.session_state['input_end'] = ''
 if 'map_center' not in st.session_state:
@@ -658,7 +666,6 @@ if file_bytes:
 st.markdown('---')
 st.subheader('📍 出発地・終点地（ゴール）の設定')
 
-# A. 住所・施設名検索
 st.text_input(
     '🔍 住所・施設名から検索',
     placeholder='例: 東京都千代田区丸の内1-9-1 または 東京タワー',
@@ -680,7 +687,6 @@ with col_a2:
 
 st.write('')
 
-# B. 出発地入力 ＆ 地図中心セットボタン
 st.text_input('📍 出発地 (lat, lon)', key='input_start')
 st.button(
     '📍 地図中心（✚）を出発地にセット',
@@ -690,7 +696,6 @@ st.button(
 
 st.write('')
 
-# C. 終点地入力 ＆ 地図中心セットボタン
 st.text_input('🏁 終点地 (lat, lon ※空欄で戻る)', key='input_end')
 st.button(
     '🏁 終点地に（✚）をセット',
@@ -890,18 +895,35 @@ if 'result' in st.session_state:
         use_container_width=True,
     )
 
+  # B. Google Maps ナビリンク（通常と現在地発の2ボタン並列）
   st.markdown('---')
-  st.subheader(f'🔗 Google Maps URL {mode_text}')
+  st.subheader(f'🔗 Google Maps ナビURL {mode_text}')
+  st.caption(
+      '💡【使い分け】現場から少し離れた場所から始める時は、右側の『📍'
+      ' 現在地から開始』を押すと一発でナビが始まります！'
+  )
 
   for item in res['urls_info']:
-    st.markdown(f"**Part {item['part']}**: `{item['start']}` ➔ `{item['end']}`")
-    st.link_button(
-        f"🌐 Part {item['part']} のナビを開く",
-        item['url'],
-        use_container_width=True,
+    st.markdown(
+        f"**Part {item['part']}**: `{item['start']}` ➔ `{item['end']}`"
+        f" ({item['count']}区間)"
     )
+    col_u1, col_u2 = st.columns(2)
+    with col_u1:
+      st.link_button(
+          f"🚗 Part {item['part']} (通常)",
+          item['url'],
+          use_container_width=True,
+      )
+    with col_u2:
+      st.link_button(
+          '📍 現在地から開始',
+          item['current_loc_url'],
+          use_container_width=True,
+      )
     st.write('')
 
+  # C. 最適化マップ
   st.markdown('---')
   st.subheader('🗺️ 最適化ルートマップ')
 
@@ -912,7 +934,6 @@ if 'result' in st.session_state:
       res['ordered_spots']
   )
 
-  # 結果マップの生成
   m = folium.Map(location=[avg_lat, avg_lon], zoom_start=11, tiles=None)
 
   folium.TileLayer('OpenStreetMap', name='標準地図').add_to(m)
@@ -924,7 +945,7 @@ if 'result' in st.session_state:
   ).add_to(m)
   folium.LayerControl(position='topright').add_to(m)
 
-  # ★【新機能】結果マップにもGPS現在地ボタン（LocateControl）を追加！
+  # 結果マップにもGPS現在地ボタンを追加！
   LocateControl(
       auto_start=False,
       flyTo=True,
