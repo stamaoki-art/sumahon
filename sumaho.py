@@ -171,7 +171,7 @@ def parse_dataframe_to_spots(df):
     col_lower = col.lower()
     if any(
         k in col_lower
-        for k in ['管理番号', '名称', '名前', 'name', 'id', 'スポット', '発電設備の所在地']
+        for k in ['管理番号', '名称', '名前', 'name', 'id', 'スポット', '設備ID']
     ):
       if name_idx == -1:
         name_idx = idx
