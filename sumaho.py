@@ -105,12 +105,7 @@ def calculate_haversine_matrix(spots):
 
 
 def get_osrm_matrix_chunked(spots, chunk_size=15):
-  """
-  【URL文字数制限完全防衛エンジン】
-  chunk_size を 15 に縮小することで、結合リクエストでも最大30地点前後に抑制。
-  かつ座標を5桁固定にすることで、URL長を常に安全圏（800〜1,000文字以内）に死守！
-  414 Request-URI Too Large や 400 Bad Request を100%回避する。
-  """
+  """OSRM Table APIによる実道路移動時間マトリックス抽出（URL文字数安全化）"""
   n = len(spots)
   matrix = np.zeros((n, n))
 
@@ -126,7 +121,6 @@ def get_osrm_matrix_chunked(spots, chunk_size=15):
         src_local = [combined_indices.index(idx) for idx in src_chunk]
         dst_local = [combined_indices.index(idx) for idx in dst_chunk]
 
-        # 座標を5桁フォーマット（例: 140.12345,36.12345）でURL文字列長を最小化！
         coords_str = ';'.join(
             f"{spots[idx]['lon']:.5f},{spots[idx]['lat']:.5f}"
             for idx in combined_indices
@@ -148,7 +142,6 @@ def get_osrm_matrix_chunked(spots, chunk_size=15):
               matrix[src_idx, dst_idx] = durations[s_i][d_j]
     return matrix
   except Exception:
-    # タイムアウトや制限時は即座にHaversineへフォールバックしてアプリ停止を絶対防止
     return calculate_haversine_matrix(spots)
 
 
@@ -353,9 +346,7 @@ def parse_bytes_content(content, filename_hint=''):
 
 
 def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=25):
-  """
-  ルート形状取得も25地点ずつに分割＆5桁丸めで、URL文字数を1,000文字以内に厳格抑制！
-  """
+  """ルート形状取得（25地点分割＆現場切り返し許可）"""
   total_spots = len(ordered_spots)
   all_coordinates = []
 
@@ -390,6 +381,7 @@ def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=25):
 
 
 def solve_tsp(duration_matrix, is_round_trip=True):
+  """実道路移動時間をコスト関数とした2-opt TSP最適化"""
   n = len(duration_matrix)
   if is_round_trip:
     if n <= 2:
@@ -466,7 +458,6 @@ def solve_tsp(duration_matrix, is_round_trip=True):
 
 
 def generate_google_maps_urls(ordered_spots, max_waypoints=9):
-  """Google Mapsナビ用URLを5桁丸めで安全に生成（長大URLによるアプリクラッシュを防止）"""
   chunk_size = max_waypoints + 1
   urls_info = []
   total_pts = len(ordered_spots)
@@ -569,7 +560,7 @@ st.title('🚚 現場向け 最短ルート作成 ＆ Google Maps生成')
 
 # --- Widget State の初期化 ---
 if 'input_start' not in st.session_state:
-  st.session_state['input_start'] = '35.6222, 139.7269'
+  st.session_state['input_start'] = '35.96550, 140.29420'
 if 'input_end' not in st.session_state:
   st.session_state['input_end'] = ''
 if 'map_center' not in st.session_state:
@@ -667,6 +658,7 @@ if file_bytes:
 st.markdown('---')
 st.subheader('📍 出発地・終点地（ゴール）の設定')
 
+# A. 住所・施設名検索
 st.text_input(
     '🔍 住所・施設名から検索',
     placeholder='例: 東京都千代田区丸の内1-9-1 または 東京タワー',
@@ -688,6 +680,7 @@ with col_a2:
 
 st.write('')
 
+# B. 出発地入力 ＆ 地図中心セットボタン
 st.text_input('📍 出発地 (lat, lon)', key='input_start')
 st.button(
     '📍 地図中心（✚）を出発地にセット',
@@ -697,6 +690,7 @@ st.button(
 
 st.write('')
 
+# C. 終点地入力 ＆ 地図中心セットボタン
 st.text_input('🏁 終点地 (lat, lon ※空欄で戻る)', key='input_end')
 st.button(
     '🏁 終点地に（✚）をセット',
@@ -831,7 +825,6 @@ if st.button(
           end_spot = {'lon': e_lon, 'lat': e_lat, 'name': '指定された終点地'}
           calc_spots = [start_spot] + raw_spots + [end_spot]
 
-        # ★【URL文字数短縮対応】チャンクサイズ15＆5桁丸めで通信エラーを完全防止
         dist_matrix = get_osrm_matrix_chunked(calc_spots, chunk_size=15)
         tour = solve_tsp(dist_matrix, is_round_trip=is_round_trip)
         ordered_spots = [calc_spots[idx] for idx in tour]
@@ -919,6 +912,7 @@ if 'result' in st.session_state:
       res['ordered_spots']
   )
 
+  # 結果マップの生成
   m = folium.Map(location=[avg_lat, avg_lon], zoom_start=11, tiles=None)
 
   folium.TileLayer('OpenStreetMap', name='標準地図').add_to(m)
@@ -929,6 +923,14 @@ if 'result' in st.session_state:
       max_zoom=18,
   ).add_to(m)
   folium.LayerControl(position='topright').add_to(m)
+
+  # ★【新機能】結果マップにもGPS現在地ボタン（LocateControl）を追加！
+  LocateControl(
+      auto_start=False,
+      flyTo=True,
+      keepCurrentZoomLevel=False,
+      strings={'title': 'GPS現在地を表示'},
+  ).add_to(m)
 
   route_latlons = [(lat, lon) for lon, lat in res['detailed_route']]
   folium.PolyLine(
