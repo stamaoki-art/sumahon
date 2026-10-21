@@ -9,6 +9,7 @@ from folium.plugins import LocateControl
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_folium import st_folium
 
 # ==========================================
@@ -24,7 +25,6 @@ def search_address_to_latlon(address_text):
   query = address_text.strip()
   encoded_query = urllib.parse.quote(query)
 
-  # 1. 国土地理院 API
   try:
     gsi_url = f'https://msearch.gsi.go.jp/address-search/AddressSearch?q={encoded_query}'
     req = urllib.request.Request(
@@ -38,7 +38,6 @@ def search_address_to_latlon(address_text):
   except Exception:
     pass
 
-  # 2. OpenStreetMap (Nominatim) API
   try:
     osm_url = f'https://nominatim.openstreetmap.org/search?q={encoded_query}&format=json&limit=1'
     req = urllib.request.Request(
@@ -55,7 +54,6 @@ def search_address_to_latlon(address_text):
 
 
 def parse_lat_lon_pair(val1, val2=None):
-  """単一文字列または2値から緯度経度を安全に取得"""
   if val1 is None or str(val1).strip() == '' or str(val1).strip().lower() == 'nan':
     return None, None
   try:
@@ -82,13 +80,10 @@ def parse_lat_lon_pair(val1, val2=None):
 
 
 def calculate_haversine_matrix(spots):
-  """全地点間の球面大円距離(メートル)行列"""
   lats = np.radians([s['lat'] for s in spots])
   lons = np.radians([s['lon'] for s in spots])
-
   dlat = lats[:, np.newaxis] - lats[np.newaxis, :]
   dlon = lons[:, np.newaxis] - lons[np.newaxis, :]
-
   a = (
       np.sin(dlat / 2.0) ** 2
       + np.cos(lats[:, np.newaxis])
@@ -101,38 +96,30 @@ def calculate_haversine_matrix(spots):
 
 
 def get_osrm_matrix_chunked(spots, chunk_size=15):
-  """OSRM Table APIによる実道路移動時間マトリックス抽出"""
   n = len(spots)
   matrix = np.zeros((n, n))
-
   chunks = [
       list(range(i, min(i + chunk_size, n))) for i in range(0, n, chunk_size)
   ]
-
   try:
     for src_chunk in chunks:
       for dst_chunk in chunks:
         combined_indices = list(dict.fromkeys(src_chunk + dst_chunk))
-
         src_local = [combined_indices.index(idx) for idx in src_chunk]
         dst_local = [combined_indices.index(idx) for idx in dst_chunk]
-
         coords_str = ';'.join(
             f"{spots[idx]['lon']:.5f},{spots[idx]['lat']:.5f}"
             for idx in combined_indices
         )
         src_str = ';'.join(map(str, src_local))
         dst_str = ';'.join(map(str, dst_local))
-
         url = f'https://router.project-osrm.org/table/v1/driving/{coords_str}?sources={src_str}&destinations={dst_str}&annotations=duration'
-
         req = urllib.request.Request(
             url, headers={'User-Agent': 'TSP-OSRM-App-Agent'}
         )
         with urllib.request.urlopen(req, timeout=10) as response:
           data = json.loads(response.read().decode())
           durations = data['durations']
-
           for s_i, src_idx in enumerate(src_chunk):
             for d_j, dst_idx in enumerate(dst_chunk):
               matrix[src_idx, dst_idx] = durations[s_i][d_j]
@@ -171,20 +158,13 @@ def parse_dataframe_to_spots(df):
     col_lower = col.lower()
     if any(
         k in col_lower
-        for k in ['管理番号', '設備ID', '名前', 'yjsnpi', 'id', 'スポット', '場所']
+        for k in ['管理番号', '名称', '名前', '設備ID', 'id', 'スポット']
     ):
       if name_idx == -1:
         name_idx = idx
     elif any(
         k in col_lower
-        for k in [
-            '緯度経度',
-            '経度緯度',
-            '座標',
-            'latlon',
-            'location',
-            'coords',
-        ]
+        for k in ['緯度経度', '経度緯度', '座標', 'latlon', 'location', 'coords']
     ):
       latlon_idx = idx
     elif any(k in col_lower for k in ['緯度', 'lat', 'latitude']):
@@ -207,7 +187,6 @@ def parse_dataframe_to_spots(df):
 
     if latlon_idx != -1 and latlon_idx < len(row):
       lat, lon = parse_lat_lon_pair(row[latlon_idx])
-
     if (
         (lat is None or lon is None)
         and lat_idx != -1
@@ -216,7 +195,6 @@ def parse_dataframe_to_spots(df):
         and lon_idx < len(row)
     ):
       lat, lon = parse_lat_lon_pair(row[lat_idx], row[lon_idx])
-
     if lat is None or lon is None:
       for cell in row:
         t_lat, t_lon = parse_lat_lon_pair(cell)
@@ -231,18 +209,13 @@ def parse_dataframe_to_spots(df):
           'name': name,
           'raw_dict': row_dict,
       })
-
   return spots
 
 
 def parse_bytes_content(content, filename_hint=''):
   filename_hint = filename_hint.lower()
-  is_xlsx = content.startswith(b'PK\x03\x04') or filename_hint.endswith(
-      '.xlsx'
-  )
-  is_xls = content.startswith(b'\xd0\xcf\x11\xe0') or filename_hint.endswith(
-      '.xls'
-  )
+  is_xlsx = content.startswith(b'PK\x03\x04') or filename_hint.endswith('.xlsx')
+  is_xls = content.startswith(b'\xd0\xcf\x11\xe0') or filename_hint.endswith('.xls')
 
   if is_xlsx or is_xls:
     df = pd.read_excel(io.BytesIO(content))
@@ -280,7 +253,6 @@ def parse_bytes_content(content, filename_hint=''):
         name = props.get(
             'name', props.get('title', props.get('管理番号', '未命名の地点'))
         )
-
         if g_type == 'Point':
           spots.append({
               'lon': round(float(coords[0]), 5),
@@ -332,7 +304,6 @@ def parse_bytes_content(content, filename_hint=''):
   if header and rows:
     df = pd.DataFrame(rows, columns=header[: len(rows[0])])
     return parse_dataframe_to_spots(df)
-
   return []
 
 
@@ -344,17 +315,12 @@ def parse_bytes_content(content, filename_hint=''):
 def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=25):
   total_spots = len(ordered_spots)
   all_coordinates = []
-
   idx = 0
   while idx < total_spots - 1:
     end_idx = min(idx + max_chunk, total_spots - 1)
     sub_spots = ordered_spots[idx : end_idx + 1]
-
-    coords_str = ';'.join(
-        f"{s['lon']:.5f},{s['lat']:.5f}" for s in sub_spots
-    )
+    coords_str = ';'.join(f"{s['lon']:.5f},{s['lat']:.5f}" for s in sub_spots)
     url = f'https://router.project-osrm.org/route/v1/driving/{coords_str}?overview=full&geometries=geojson&continue_straight=false'
-
     req = urllib.request.Request(
         url, headers={'User-Agent': 'TSP-OSRM-App-Agent'}
     )
@@ -369,9 +335,7 @@ def get_osrm_route_geometry_chunked(ordered_spots, max_chunk=25):
           all_coordinates.extend(sub_coords)
     except Exception:
       pass
-
     idx = end_idx
-
   return all_coordinates
 
 
@@ -452,11 +416,6 @@ def solve_tsp(duration_matrix, is_round_trip=True):
 
 
 def generate_google_maps_urls(ordered_spots, max_waypoints=9):
-  """
-  通常URLに加え、現在地を出発地点とするURL（current_loc_url）を生成。
-  double slash (//) を用いることで、出発地をスマホの現在地に固定し、
-  前の現場をスキップして次の目的地へ直行ナビを即座に開始できる。
-  """
   chunk_size = max_waypoints + 1
   urls_info = []
   total_pts = len(ordered_spots)
@@ -467,13 +426,9 @@ def generate_google_maps_urls(ordered_spots, max_waypoints=9):
     end_idx = min(idx + chunk_size, total_pts - 1)
     sub_spots = ordered_spots[idx : end_idx + 1]
 
-    # 通常URL (sub_spots[0] を起点とする固定ルート)
-    path_coords = '/'.join(
-        f"{s['lat']:.5f},{s['lon']:.5f}" for s in sub_spots
-    )
+    path_coords = '/'.join(f"{s['lat']:.5f},{s['lon']:.5f}" for s in sub_spots)
     url = f'https://www.google.com/maps/dir/{path_coords}'
 
-    # 現在地発URL (現在地を起点とし、次の訪問先 sub_spots[1:] へ向かう)
     next_spots_coords = '/'.join(
         f"{s['lat']:.5f},{s['lon']:.5f}" for s in sub_spots[1:]
     )
@@ -532,6 +487,116 @@ def create_export_dataframe(res):
 
 
 # ==========================================
+# ★ 新機能：HTMLスタンドアローン化（消去防止）
+# ==========================================
+def create_result_map(res):
+  """結果描画用のFoliumマップを生成"""
+  avg_lat = sum(s['lat'] for s in res['ordered_spots']) / len(
+      res['ordered_spots']
+  )
+  avg_lon = sum(s['lon'] for s in res['ordered_spots']) / len(
+      res['ordered_spots']
+  )
+
+  m = folium.Map(location=[avg_lat, avg_lon], zoom_start=11, tiles=None)
+
+  folium.TileLayer('OpenStreetMap', name='標準地図').add_to(m)
+  folium.TileLayer(
+      tiles='https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg',
+      attr='国土地理院',
+      name='📡 航空写真',
+      max_zoom=18,
+  ).add_to(m)
+  folium.LayerControl(position='topright').add_to(m)
+
+  LocateControl(
+      auto_start=False,
+      flyTo=True,
+      keepCurrentZoomLevel=False,
+      strings={'title': 'GPS現在地を表示'},
+  ).add_to(m)
+
+  route_latlons = [(lat, lon) for lon, lat in res['detailed_route']]
+  folium.PolyLine(
+      route_latlons, color='#d32f2f', weight=5, opacity=0.8
+  ).add_to(m)
+
+  total_len = len(res['tour'])
+  for order, idx in enumerate(res['tour']):
+    if res['is_round_trip'] and order == total_len - 1:
+      continue
+
+    spot = res['calc_spots'][idx]
+
+    if order == 0:
+      txt = 'START / GOAL' if res['is_round_trip'] else 'START'
+      folium.Marker(
+          [spot['lat'], spot['lon']],
+          popup=txt,
+          tooltip=txt,
+          icon=folium.Icon(color='red', icon='play'),
+      ).add_to(m)
+    elif not res['is_round_trip'] and order == total_len - 1:
+      folium.Marker(
+          [spot['lat'], spot['lon']],
+          popup=f"GOAL: {spot['name']}",
+          tooltip=f"GOAL: {spot['name']}",
+          icon=folium.Icon(color='green', icon='flag'),
+      ).add_to(m)
+    else:
+      folium.Marker(
+          [spot['lat'], spot['lon']],
+          popup=f"[{order}] {spot['name']}",
+          tooltip=f"[{order}] {spot['name']}",
+          icon=folium.Icon(color='blue', icon='info-sign'),
+      ).add_to(m)
+
+  return m
+
+
+def generate_standalone_html(res, m):
+  """URLリンクとFolium地図を1枚の完全なHTMLに合成（リロード消去防止用）"""
+  mode_text = '【周回】' if res['is_round_trip'] else '【片道】'
+
+  links_html = f"""
+  <div style="padding: 15px; font-family: sans-serif; background-color: #f8f9fa; border-bottom: 2px solid #ccc; max-height: 40vh; overflow-y: auto;">
+      <h3 style="margin-top: 0; font-size: 18px;">🔗 Google Maps ナビURL {mode_text}</h3>
+      <p style="font-size: 13px; color: #d32f2f; font-weight: bold; margin-bottom: 10px;">
+          ※この画面はオフラインでも機能し、ブラウザがリロードされても消えません！このままナビにお使いください。
+      </p>
+      <div style="display: flex; flex-direction: column; gap: 10px;">
+  """
+
+  for item in res['urls_info']:
+    links_html += f"""
+      <div style="background: white; padding: 10px; border-radius: 8px; border: 1px solid #ddd;">
+          <div style="font-weight: bold; margin-bottom: 8px; font-size: 14px;">
+              Part {item['part']}: {item['start']} ➔ {item['end']} ({item['count']}区間)
+          </div>
+          <div style="display: flex; gap: 10px;">
+              <a href="{item['url']}" target="_blank" style="flex: 1; text-align: center; text-decoration: none; background-color: #e0e0e0; color: #333; padding: 10px; border-radius: 5px; font-weight: bold; font-size: 14px;">🚗 通常ルート</a>
+              <a href="{item['current_loc_url']}" target="_blank" style="flex: 1; text-align: center; text-decoration: none; background-color: #0288d1; color: white; padding: 10px; border-radius: 5px; font-weight: bold; font-size: 14px;">📍 現在地から開始</a>
+          </div>
+      </div>
+      """
+  links_html += """
+      </div>
+  </div>
+  """
+
+  map_html = m.get_root().render()
+
+  final_html = map_html.replace(
+      '<body>',
+      f'<body style="margin:0; padding:0; display:flex; flex-direction:column; height:100vh; overflow:hidden;">\n{links_html}\n<div style="flex-grow:1; position:relative;">',
+      1,
+  )
+  final_html = final_html.replace('</body>', '</div></body>')
+
+  return final_html
+
+
+# ==========================================
 # 3. Streamlit WEB GUI 部
 # ==========================================
 
@@ -583,7 +648,6 @@ def set_start_from_center():
     st.session_state['map_center'] = st.session_state['last_dragged_center']
   if 'last_dragged_zoom' in st.session_state:
     st.session_state['map_zoom'] = st.session_state['last_dragged_zoom']
-
   c_lat, c_lon = st.session_state['map_center']
   st.session_state['input_start'] = f'{c_lat:.5f}, {c_lon:.5f}'
 
@@ -593,7 +657,6 @@ def set_end_from_center():
     st.session_state['map_center'] = st.session_state['last_dragged_center']
   if 'last_dragged_zoom' in st.session_state:
     st.session_state['map_zoom'] = st.session_state['last_dragged_zoom']
-
   c_lat, c_lon = st.session_state['map_center']
   st.session_state['input_end'] = f'{c_lat:.5f}, {c_lon:.5f}'
 
@@ -847,6 +910,14 @@ if st.button(
             'detailed_route': detailed_route,
             'urls_info': urls_info,
         }
+
+        # ★【吹き飛び防止】マップHTMLをこの段階で裏側生成！
+        res_map = create_result_map(st.session_state['result'])
+        st.session_state['result_map'] = res_map
+        st.session_state['standalone_html'] = generate_standalone_html(
+            st.session_state['result'], res_map
+        )
+
         st.success(f'🎉 計算完了！（全 {len(raw_spots)} スポット）')
 
       except Exception as e:
@@ -857,10 +928,46 @@ if 'result' in st.session_state:
   res = st.session_state['result']
   mode_text = '【周回】' if res['is_round_trip'] else '【片道】'
 
+  # ★★★【データ吹き飛び防止策：HTMLジャンプボタン】★★★
+  if 'standalone_html' in st.session_state:
+    st.markdown('---')
+    st.subheader('🛡️ データ吹き飛び防止（超重要！）')
+    st.error(
+        'スマホでは時間が経つと勝手にリロードされて結果が消えてしまいます！以下のボタンから**「消えない別画面」**を開いて使ってください！'
+    )
+
+    col_jump1, col_jump2 = st.columns(2)
+    with col_jump1:
+      html_encoded = urllib.parse.quote(st.session_state['standalone_html'])
+      components.html(
+          f"""
+          <button id="open_html" style="width:100%; padding:15px; background:#4CAF50; color:white; border:none; border-radius:8px; font-weight:bold; font-size:16px; cursor:pointer; box-shadow: 0 2px 5px rgba(0,0,0,0.2);">
+            🌐 消えない別画面で開く
+          </button>
+          <script>
+          document.getElementById('open_html').addEventListener('click', function() {{
+              const htmlContent = decodeURIComponent("{html_encoded}");
+              const blob = new Blob([htmlContent], {{ type: 'text/html;charset=utf-8' }});
+              const url = URL.createObjectURL(blob);
+              window.open(url, '_blank');
+          }});
+          </script>
+          """,
+          height=65,
+      )
+    with col_jump2:
+      st.download_button(
+          label='📥 HTMLファイルとして保存',
+          data=st.session_state['standalone_html'],
+          file_name='route_result.html',
+          mime='text/html',
+          use_container_width=True,
+      )
+
   st.markdown('---')
   st.subheader('📄 並び替え済みリストのダウンロード')
   st.caption(
-      '元データの全情報（管理番号、住所、作業内容など）に『訪問順』を付与して最適順に並び替えたファイルです。'
+      '元データの全情報に『訪問順』を付与して最適順に並び替えたファイルです。'
   )
 
   df_export = create_export_dataframe(res)
@@ -895,11 +1002,10 @@ if 'result' in st.session_state:
         use_container_width=True,
     )
 
-  # B. Google Maps ナビリンク（通常と現在地発の2ボタン並列）
   st.markdown('---')
   st.subheader(f'🔗 Google Maps ナビURL {mode_text}')
   st.caption(
-      '💡【使い分け】現場から少し離れた場所から始める時は、右側の『📍'
+      '💡現場から少し離れた場所から始める時は『📍'
       ' 現在地から開始』を押すと一発でナビが始まります！'
   )
 
@@ -923,69 +1029,10 @@ if 'result' in st.session_state:
       )
     st.write('')
 
-  # C. 最適化マップ
   st.markdown('---')
   st.subheader('🗺️ 最適化ルートマップ')
 
-  avg_lat = sum(s['lat'] for s in res['ordered_spots']) / len(
-      res['ordered_spots']
-  )
-  avg_lon = sum(s['lon'] for s in res['ordered_spots']) / len(
-      res['ordered_spots']
-  )
-
-  m = folium.Map(location=[avg_lat, avg_lon], zoom_start=11, tiles=None)
-
-  folium.TileLayer('OpenStreetMap', name='標準地図').add_to(m)
-  folium.TileLayer(
-      tiles='https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg',
-      attr='国土地理院',
-      name='📡 航空写真',
-      max_zoom=18,
-  ).add_to(m)
-  folium.LayerControl(position='topright').add_to(m)
-
-  # 結果マップにもGPS現在地ボタンを追加！
-  LocateControl(
-      auto_start=False,
-      flyTo=True,
-      keepCurrentZoomLevel=False,
-      strings={'title': 'GPS現在地を表示'},
-  ).add_to(m)
-
-  route_latlons = [(lat, lon) for lon, lat in res['detailed_route']]
-  folium.PolyLine(
-      route_latlons, color='#d32f2f', weight=5, opacity=0.8
-  ).add_to(m)
-
-  total_len = len(res['tour'])
-  for order, idx in enumerate(res['tour']):
-    if res['is_round_trip'] and order == total_len - 1:
-      continue
-
-    spot = res['calc_spots'][idx]
-
-    if order == 0:
-      txt = 'START / GOAL' if res['is_round_trip'] else 'START'
-      folium.Marker(
-          [spot['lat'], spot['lon']],
-          popup=txt,
-          tooltip=txt,
-          icon=folium.Icon(color='red', icon='play'),
-      ).add_to(m)
-    elif not res['is_round_trip'] and order == total_len - 1:
-      folium.Marker(
-          [spot['lat'], spot['lon']],
-          popup=f"GOAL: {spot['name']}",
-          tooltip=f"GOAL: {spot['name']}",
-          icon=folium.Icon(color='green', icon='flag'),
-      ).add_to(m)
-    else:
-      folium.Marker(
-          [spot['lat'], spot['lon']],
-          popup=f"[{order}] {spot['name']}",
-          tooltip=f"[{order}] {spot['name']}",
-          icon=folium.Icon(color='blue', icon='info-sign'),
-      ).add_to(m)
-
-  st_folium(m, use_container_width=True, height=450)
+  if 'result_map' in st.session_state:
+    st_folium(
+        st.session_state['result_map'], use_container_width=True, height=450
+    )
