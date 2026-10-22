@@ -79,6 +79,29 @@ def parse_lat_lon_pair(val1, val2=None):
     return None, None
 
 
+def deduplicate_spots(spots, start_coord=None):
+  """完全一致する座標を検知し、重複を除外する。
+
+  start_coord が指定された場合、出発地と同一座標のスポットも除外する。
+  戻り値: (unique_spots, duplicates)
+  """
+  seen = set()
+  if start_coord is not None:
+    seen.add((round(start_coord[0], 5), round(start_coord[1], 5)))
+
+  unique_spots = []
+  duplicates = []
+  for s in spots:
+    coord_key = (round(s['lat'], 5), round(s['lon'], 5))
+    if coord_key in seen:
+      duplicates.append(s)
+    else:
+      seen.add(coord_key)
+      unique_spots.append(s)
+
+  return unique_spots, duplicates
+
+
 def calculate_haversine_matrix(spots):
   lats = np.radians([s['lat'] for s in spots])
   lons = np.radians([s['lon'] for s in spots])
@@ -215,7 +238,9 @@ def parse_dataframe_to_spots(df):
 def parse_bytes_content(content, filename_hint=''):
   filename_hint = filename_hint.lower()
   is_xlsx = content.startswith(b'PK\x03\x04') or filename_hint.endswith('.xlsx')
-  is_xls = content.startswith(b'\xd0\xcf\x11\xe0') or filename_hint.endswith('.xls')
+  is_xls = content.startswith(b'\xd0\xcf\x11\xe0') or filename_hint.endswith(
+      '.xls'
+  )
 
   if is_xlsx or is_xls:
     df = pd.read_excel(io.BytesIO(content))
@@ -718,7 +743,13 @@ else:
 preview_spots = []
 if file_bytes:
   try:
-    preview_spots = parse_bytes_content(file_bytes, file_hint_name)
+    raw_preview = parse_bytes_content(file_bytes, file_hint_name)
+    preview_spots, preview_dups = deduplicate_spots(raw_preview)
+    if preview_dups:
+      st.warning(
+          f'⚠️ ファイル内に完全一致する重複座標が {len(preview_dups)}'
+          ' 件見つかりました。ルート計算時に自動で除外されます。'
+      )
   except Exception:
     pass
 
@@ -880,16 +911,38 @@ if st.button(
           st.error('📍 出発地を指定してください。')
           st.stop()
 
+        # ★【重複座標自動検知＆除外システム】出発地との被りも含めて完全一致を排除！
+        unique_spots, duplicates = deduplicate_spots(
+            raw_spots, start_coord=(s_lat, s_lon)
+        )
+
+        if duplicates:
+          dup_names = [f"「{d['name']}」" for d in duplicates[:5]]
+          more_txt = (
+              f' 他 {len(duplicates)-5} 件' if len(duplicates) > 5 else ''
+          )
+          st.warning(
+              f'⚠️ Google Mapsのエラーを防ぐため、完全一致する重複座標 {len(duplicates)}'
+              f' 件を除外してルート計算しました。\n\n（除外対象:'
+              f' {", ".join(dup_names)}{more_txt}）'
+          )
+
+        if not unique_spots:
+          st.error(
+              '有効な立ち寄り先がありません（すべて出発地と同じか重複しています）。'
+          )
+          st.stop()
+
         start_spot = {'lon': s_lon, 'lat': s_lat, 'name': '指定された出発地'}
         e_lat, e_lon = parse_lat_lon_pair(st.session_state['input_end'])
 
         if e_lat is None or e_lon is None:
           is_round_trip = True
-          calc_spots = [start_spot] + raw_spots
+          calc_spots = [start_spot] + unique_spots
         else:
           is_round_trip = False
           end_spot = {'lon': e_lon, 'lat': e_lat, 'name': '指定された終点地'}
-          calc_spots = [start_spot] + raw_spots + [end_spot]
+          calc_spots = [start_spot] + unique_spots + [end_spot]
 
         dist_matrix = get_osrm_matrix_chunked(calc_spots, chunk_size=15)
         tour = solve_tsp(dist_matrix, is_round_trip=is_round_trip)
@@ -907,6 +960,7 @@ if st.button(
             'ordered_spots': ordered_spots,
             'detailed_route': detailed_route,
             'urls_info': urls_info,
+            'duplicates': duplicates,
         }
 
         res_map = create_result_map(st.session_state['result'])
@@ -915,7 +969,11 @@ if st.button(
             st.session_state['result'], res_map
         )
 
-        st.success(f'🎉 計算完了！（全 {len(raw_spots)} スポット）')
+        st.success(
+            f'🎉 計算完了！（立ち寄り先: {len(unique_spots)} 件'
+            + (f' / 重複除外: {len(duplicates)} 件' if duplicates else '')
+            + '）'
+        )
 
       except Exception as e:
         st.error(f'計算エラー: {e}')
@@ -960,6 +1018,20 @@ if 'result' in st.session_state:
           mime='text/html',
           use_container_width=True,
       )
+
+  # 重複除外された地点の一覧アコーディオン
+  if res.get('duplicates'):
+    with st.expander(
+        f"⚠️ 重複として除外された地点 ({len(res['duplicates'])} 件)",
+        expanded=False,
+    ):
+      st.caption('同じ座標（または出発地と同一座標）のため除外されたリストです。')
+      dup_df = pd.DataFrame([{
+          '名称/ID': d['name'],
+          '緯度': d['lat'],
+          '経度': d['lon'],
+      } for d in res['duplicates']])
+      st.dataframe(dup_df, use_container_width=True)
 
   # B. 並び替え済みリストのダウンロード
   st.markdown('---')
@@ -1028,7 +1100,7 @@ if 'result' in st.session_state:
       )
     st.write('')
 
-  # D. 最適化ルートマップ（★【無限リロード防止】key付与 ＆ returned_objects=[] で完全固定！）
+  # D. 最適化ルートマップ
   st.markdown('---')
   st.subheader('🗺️ 最適化ルートマップ')
 
