@@ -158,7 +158,7 @@ def parse_dataframe_to_spots(df):
     col_lower = col.lower()
     if any(
         k in col_lower
-        for k in ['管理番号', '名称', '名前', '設備ID', 'id', 'スポット']
+        for k in ['管理番号', '名称', '名前', '設備', 'id', 'スポット']
     ):
       if name_idx == -1:
         name_idx = idx
@@ -487,10 +487,9 @@ def create_export_dataframe(res):
 
 
 # ==========================================
-# ★ 新機能：HTMLスタンドアローン化（消去防止）
+# 3. HTMLスタンドアローン化（消去防止）
 # ==========================================
 def create_result_map(res):
-  """結果描画用のFoliumマップを生成"""
   avg_lat = sum(s['lat'] for s in res['ordered_spots']) / len(
       res['ordered_spots']
   )
@@ -555,7 +554,6 @@ def create_result_map(res):
 
 
 def generate_standalone_html(res, m):
-  """URLリンクとFolium地図を1枚の完全なHTMLに合成（リロード消去防止用）"""
   mode_text = '【周回】' if res['is_round_trip'] else '【片道】'
 
   links_html = f"""
@@ -597,7 +595,7 @@ def generate_standalone_html(res, m):
 
 
 # ==========================================
-# 3. Streamlit WEB GUI 部
+# 4. Streamlit WEB GUI 部
 # ==========================================
 
 st.set_page_config(
@@ -911,7 +909,6 @@ if st.button(
             'urls_info': urls_info,
         }
 
-        # ★【吹き飛び防止】マップHTMLをこの段階で裏側生成！
         res_map = create_result_map(st.session_state['result'])
         st.session_state['result_map'] = res_map
         st.session_state['standalone_html'] = generate_standalone_html(
@@ -928,7 +925,7 @@ if 'result' in st.session_state:
   res = st.session_state['result']
   mode_text = '【周回】' if res['is_round_trip'] else '【片道】'
 
-  # ★★★【データ吹き飛び防止策：HTMLジャンプボタン】★★★
+  # A. データ吹き飛び防止HTMLボタン
   if 'standalone_html' in st.session_state:
     st.markdown('---')
     st.subheader('🛡️ データ吹き飛び防止（超重要！）')
@@ -964,6 +961,7 @@ if 'result' in st.session_state:
           use_container_width=True,
       )
 
+  # B. 並び替え済みリストのダウンロード
   st.markdown('---')
   st.subheader('📄 並び替え済みリストのダウンロード')
   st.caption(
@@ -1002,6 +1000,7 @@ if 'result' in st.session_state:
         use_container_width=True,
     )
 
+  # C. Google Maps ナビリンク
   st.markdown('---')
   st.subheader(f'🔗 Google Maps ナビURL {mode_text}')
   st.caption(
@@ -1029,10 +1028,15 @@ if 'result' in st.session_state:
       )
     st.write('')
 
+  # D. 最適化ルートマップ（★【無限リロード防止】key付与 ＆ returned_objects=[] で完全固定！）
   st.markdown('---')
   st.subheader('🗺️ 最適化ルートマップ')
 
   if 'result_map' in st.session_state:
     st_folium(
-        st.session_state['result_map'], use_container_width=True, height=450
+        st.session_state['result_map'],
+        key='route_result_map',
+        returned_objects=[],
+        use_container_width=True,
+        height=480,
     )
