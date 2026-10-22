@@ -80,11 +80,6 @@ def parse_lat_lon_pair(val1, val2=None):
 
 
 def deduplicate_spots(spots, start_coord=None):
-  """完全一致する座標を検知し、重複を除外する。
-
-  start_coord が指定された場合、出発地と同一座標のスポットも除外する。
-  戻り値: (unique_spots, duplicates)
-  """
   seen = set()
   if start_coord is not None:
     seen.add((round(start_coord[0], 5), round(start_coord[1], 5)))
@@ -474,9 +469,11 @@ def generate_google_maps_urls(ordered_spots, max_waypoints=9):
 
 
 def create_export_dataframe(res):
+  """訪問順序リストに加え、スルーされた地点を「スルー_1」「スルー_2」として末尾に記録！"""
   tour = res['tour']
   calc_spots = res['calc_spots']
   is_round_trip = res['is_round_trip']
+  skipped_spots = res.get('skipped_spots', [])
   total_len = len(tour)
 
   export_rows = []
@@ -506,6 +503,21 @@ def create_export_dataframe(res):
       if k not in row_data:
         row_data[k] = v
 
+    export_rows.append(row_data)
+
+  # ★ スルー地点を「スルー_1」「スルー_2」... として記録
+  for s_idx, spot in enumerate(skipped_spots, start=1):
+    raw = spot.get('raw_dict', {})
+    row_data = {
+        '訪問順': '-',
+        '区分': f'スルー_{s_idx}',
+        '名称/識別ID': spot['name'],
+        '緯度': round(spot['lat'], 5),
+        '経度': round(spot['lon'], 5),
+    }
+    for k, v in raw.items():
+      if k not in row_data:
+        row_data[k] = v
     export_rows.append(row_data)
 
   return pd.DataFrame(export_rows)
@@ -663,6 +675,8 @@ if 'map_center' not in st.session_state:
   st.session_state['map_center'] = (36.0, 140.0)
 if 'map_zoom' not in st.session_state:
   st.session_state['map_zoom'] = 10
+if 'skipped_spot_keys' not in st.session_state:
+  st.session_state['skipped_spot_keys'] = set()
 
 
 # --- コールバック関数群 ---
@@ -796,11 +810,11 @@ st.button(
 )
 
 st.caption(
-    '💡 使い方:'
-    ' 地図左上の「🎯（GPSマーク）」を押すと現在地に自動移動します。右上のボタンで「航空写真」にも切り替えられます！'
+    '💡 **ピンをタップすると「スルー（除外）」に切り替えられます！**'
+    ' （グレーピン＝スルー中）'
 )
 
-# --- 地図描画 ---
+# --- 地図描画（ピンタップでスルー切替） ---
 s_lat, s_lon = parse_lat_lon_pair(st.session_state['input_start'])
 e_lat, e_lon = parse_lat_lon_pair(st.session_state['input_end'])
 
@@ -848,13 +862,25 @@ crosshair_html = """
 """
 m_input.get_root().html.add_child(folium.Element(crosshair_html))
 
+# ★ スポットの描画（通常＝青 / スルー＝グレー＆✖）
 for s in preview_spots:
-  folium.Marker(
-      [s['lat'], s['lon']],
-      popup=s['name'],
-      tooltip=s['name'],
-      icon=folium.Icon(color='blue', icon='info-sign'),
-  ).add_to(m_input)
+  s_key = (round(s['lat'], 5), round(s['lon'], 5))
+  is_skipped = s_key in st.session_state['skipped_spot_keys']
+
+  if is_skipped:
+    folium.Marker(
+        [s['lat'], s['lon']],
+        popup=f"【🚫 スルー中】<br>{s['name']}<br><i>(タップで復活)</i>",
+        tooltip=f"🚫 スルー中: {s['name']}",
+        icon=folium.Icon(color='lightgray', icon='remove', icon_color='#666'),
+    ).add_to(m_input)
+  else:
+    folium.Marker(
+        [s['lat'], s['lon']],
+        popup=f"{s['name']}<br><i>(タップでスルー)</i>",
+        tooltip=s['name'],
+        icon=folium.Icon(color='blue', icon='info-sign'),
+    ).add_to(m_input)
 
 if s_lat and s_lon:
   folium.Marker(
@@ -877,9 +903,10 @@ map_output = st_folium(
     key='select_map',
     use_container_width=True,
     height=380,
-    returned_objects=['center', 'zoom'],
+    returned_objects=['center', 'zoom', 'last_object_clicked'],
 )
 
+# 地図ドラッグ位置の記録
 if map_output and 'center' in map_output and map_output['center']:
   c_lat = map_output['center']['lat']
   c_lon = map_output['center']['lng']
@@ -887,6 +914,54 @@ if map_output and 'center' in map_output and map_output['center']:
 
 if map_output and 'zoom' in map_output and map_output['zoom']:
   st.session_state['last_dragged_zoom'] = map_output['zoom']
+
+# ★【ピンクリックでスルー切替ロジック】
+if map_output and map_output.get('last_object_clicked'):
+  clicked_pt = map_output['last_object_clicked']
+  clicked_lat = clicked_pt['lat']
+  clicked_lon = clicked_pt['lng']
+
+  # 最も近いプレビュースポットを探索（誤差100m以内）
+  min_d = float('inf')
+  matched_key = None
+  matched_name = ''
+  for s in preview_spots:
+    d = (s['lat'] - clicked_lat) ** 2 + (s['lon'] - clicked_lon) ** 2
+    if d < min_d:
+      min_d = d
+      matched_key = (round(s['lat'], 5), round(s['lon'], 5))
+      matched_name = s['name']
+
+  if min_d < 1e-5 and matched_key:
+    # 連続再実行ループ防止
+    if st.session_state.get('last_handled_marker_click') != matched_key:
+      st.session_state['last_handled_marker_click'] = matched_key
+      if matched_key in st.session_state['skipped_spot_keys']:
+        st.session_state['skipped_spot_keys'].remove(matched_key)
+        st.toast(f'✅ 「{matched_name}」のスルーを解除しました！')
+      else:
+        st.session_state['skipped_spot_keys'].add(matched_key)
+        st.toast(f'🚫 「{matched_name}」をスルー対象に設定しました！')
+      st.rerun()
+
+# --- スルー地点の管理バー（スマホ押しづらさ対策） ---
+if st.session_state['skipped_spot_keys']:
+  skipped_count = len(st.session_state['skipped_spot_keys'])
+  with st.expander(f'🚫 現在スルー中の地点 ({skipped_count} 件)', expanded=True):
+    st.caption('タップした地点がスルー中になっています。')
+    col_sk1, col_sk2 = st.columns([3, 1])
+    with col_sk1:
+      skipped_names = [
+          s['name']
+          for s in preview_spots
+          if (round(s['lat'], 5), round(s['lon'], 5))
+          in st.session_state['skipped_spot_keys']
+      ]
+      st.write('、'.join(skipped_names[:10]) + (' 他' if len(skipped_names) > 10 else ''))
+    with col_sk2:
+      if st.button('🔄 全て復活', use_container_width=True):
+        st.session_state['skipped_spot_keys'] = set()
+        st.rerun()
 
 
 # --- 3. 計算実行ボタン ---
@@ -911,9 +986,19 @@ if st.button(
           st.error('📍 出発地を指定してください。')
           st.stop()
 
-        # ★【重複座標自動検知＆除外システム】出発地との被りも含めて完全一致を排除！
+        # ★【スルー地点の分離】
+        skipped_spots = []
+        active_spots = []
+        for s in raw_spots:
+          s_key = (round(s['lat'], 5), round(s['lon'], 5))
+          if s_key in st.session_state['skipped_spot_keys']:
+            skipped_spots.append(s)
+          else:
+            active_spots.append(s)
+
+        # 有効スポットから重複を除外
         unique_spots, duplicates = deduplicate_spots(
-            raw_spots, start_coord=(s_lat, s_lon)
+            active_spots, start_coord=(s_lat, s_lon)
         )
 
         if duplicates:
@@ -922,14 +1007,12 @@ if st.button(
               f' 他 {len(duplicates)-5} 件' if len(duplicates) > 5 else ''
           )
           st.warning(
-              f'⚠️ Google Mapsのエラーを防ぐため、完全一致する重複座標 {len(duplicates)}'
-              f' 件を除外してルート計算しました。\n\n（除外対象:'
-              f' {", ".join(dup_names)}{more_txt}）'
+              f'⚠️ 重複座標 {len(duplicates)} 件を除外しました。（{", ".join(dup_names)}{more_txt}）'
           )
 
         if not unique_spots:
           st.error(
-              '有効な立ち寄り先がありません（すべて出発地と同じか重複しています）。'
+              '有効な立ち寄り先がありません（すべてスルーまたは重複しています）。'
           )
           st.stop()
 
@@ -961,6 +1044,7 @@ if st.button(
             'detailed_route': detailed_route,
             'urls_info': urls_info,
             'duplicates': duplicates,
+            'skipped_spots': skipped_spots,  # スルー地点を保持
         }
 
         res_map = create_result_map(st.session_state['result'])
@@ -970,7 +1054,8 @@ if st.button(
         )
 
         st.success(
-            f'🎉 計算完了！（立ち寄り先: {len(unique_spots)} 件'
+            f'🎉 計算完了！（訪問先: {len(unique_spots)} 件'
+            + (f' / スルー: {len(skipped_spots)} 件' if skipped_spots else '')
             + (f' / 重複除外: {len(duplicates)} 件' if duplicates else '')
             + '）'
         )
@@ -1019,31 +1104,32 @@ if 'result' in st.session_state:
           use_container_width=True,
       )
 
-  # 重複除外された地点の一覧アコーディオン
-  if res.get('duplicates'):
+  # スルーされた地点の明示
+  if res.get('skipped_spots'):
     with st.expander(
-        f"⚠️ 重複として除外された地点 ({len(res['duplicates'])} 件)",
+        f"🚫 スルー（除外）された地点 ({len(res['skipped_spots'])} 件)",
         expanded=False,
     ):
-      st.caption('同じ座標（または出発地と同一座標）のため除外されたリストです。')
-      dup_df = pd.DataFrame([{
-          '名称/ID': d['name'],
-          '緯度': d['lat'],
-          '経度': d['lon'],
-      } for d in res['duplicates']])
-      st.dataframe(dup_df, use_container_width=True)
+      st.caption('今回は訪問せずスキップしたリストです。')
+      skip_df = pd.DataFrame([{
+          '区分': f'スルー_{i+1}',
+          '名称/ID': s['name'],
+          '緯度': s['lat'],
+          '経度': s['lon'],
+      } for i, s in enumerate(res['skipped_spots'])])
+      st.dataframe(skip_df, use_container_width=True)
 
-  # B. 並び替え済みリストのダウンロード
+  # B. 並び替え済みリストのダウンロード（★スルー地点も「スルー_1」「スルー_2」で記載！）
   st.markdown('---')
   st.subheader('📄 並び替え済みリストのダウンロード')
   st.caption(
-      '元データの全情報に『訪問順』を付与して最適順に並び替えたファイルです。'
+      '訪問順に並び替えたファイルです（スルーした地点も『スルー_1』等として末尾に記録されています）。'
   )
 
   df_export = create_export_dataframe(res)
 
   with st.expander('👀 並び替え後のデータプレビューを表示', expanded=False):
-    st.dataframe(df_export.head(10), use_container_width=True)
+    st.dataframe(df_export.head(15), use_container_width=True)
 
   csv_data = df_export.to_csv(index=False, encoding='utf-8-sig').encode(
       'utf-8-sig'
