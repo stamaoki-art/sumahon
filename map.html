@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>🚚 現場向け 最短ルート作成（完全単一HTML版）</title>
+  
+  <!-- Leaflet 地図ライブラリ (CDN) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  
+  <!-- SheetJS Excel/CSV解析＆生成ライブラリ (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif; display: flex; flex-direction: column; background: #eceff1; }
+    
+    #header { background: #1565c0; color: white; padding: 10px 14px; font-weight: bold; font-size: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.25); display: flex; justify-content: space-between; align-items: center; z-index: 1001; }
+    #spot-count { font-size: 12px; background: rgba(255,255,255,0.2); padding: 3px 8px; border-radius: 12px; font-weight: normal; }
+    
+    #panel { background: white; padding: 10px 12px; overflow-y: auto; max-height: 45vh; border-bottom: 2px solid #bbb; z-index: 1000; box-shadow: 0 2px 6px rgba(0,0,0,0.15); transition: max-height 0.3s; }
+    .row { margin-bottom: 8px; display: flex; gap: 6px; align-items: center; }
+    input[type="text"], input[type="file"] { width: 100%; padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; background: #fafafa; }
+    button.btn { width: 100%; padding: 10px; border: none; border-radius: 6px; font-weight: bold; font-size: 14px; cursor: pointer; user-select: none; }
+    .btn-primary { background: #1565c0; color: white; }
+    .btn-success { background: #2e7d32; color: white; }
+    .btn-secondary { background: #546e7a; color: white; }
+    .btn-danger { background: #c62828; color: white; }
+    button.btn:active { filter: brightness(0.9); }
+
+    #map-container { flex: 1; position: relative; width: 100%; height: 100%; min-height: 200px; }
+    #map { width: 100%; height: 100%; }
+    .crosshair { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 999; font-size: 28px; color: #d32f2f; font-weight: bold; pointer-events: none; text-shadow: 0 0 3px white, 0 0 3px white; }
+
+    /* 大型GPSボタン */
+    .gps-btn-ctrl {
+      background: white;
+      width: 46px;
+      height: 46px;
+      border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      cursor: pointer;
+      user-select: none;
+      border: 1px solid #bbb;
+    }
+    .gps-btn-ctrl:active { background: #e0e0e0; }
+
+    #results { margin-top: 10px; padding-top: 10px; border-top: 2px dashed #ccc; }
+    .part-card { background: #e3f2fd; border: 1px solid #90caf9; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+    .alert { background: #fff3e0; border-left: 4px solid #ff9800; padding: 8px 10px; margin-bottom: 8px; font-size: 13px; border-radius: 4px; word-break: break-all; }
+    .alert-success { background: #e8f5e9; border-left-color: #2e7d32; color: #1b5e20; }
+    .alert-warn { background: #fff8e1; border-left-color: #f57f17; color: #bf360c; }
+    .alert-error { background: #ffebee; border-left-color: #c62828; color: #b71c1c; }
+  </style>
+</head>
+<body>
+
+  <div id="header">
+    <span>🚚 現場ルート最適化（完全単一版）</span>
+    <span id="spot-count">地点: 0件</span>
+  </div>
+
+  <div id="panel">
+    <!-- 1. ファイル選択 (Excel / CSV / GeoJSON) -->
+    <div class="row">
+      <input type="file" id="file-input" accept=".xlsx,.xls,.csv,.geojson,.json">
+    </div>
+
+    <!-- 2. 出発地・終点地 -->
+    <div class="row">
+      <input type="text" id="search-query" placeholder="🔍 住所・施設名で検索">
+      <button class="btn btn-secondary" style="width: 80px;" onclick="searchAddress()">検索</button>
+    </div>
+    <div class="row">
+      <input type="text" id="start-coord" placeholder="📍 出発地 (lat, lon)">
+      <button class="btn btn-secondary" style="width: 105px;" onclick="setStartFromCenter()">中心セット</button>
+      <button class="btn btn-primary" style="width: 75px; background: #0288d1;" onclick="getCurrentGps()">🎯 GPS</button>
+    </div>
+    <div class="row">
+      <input type="text" id="end-coord" placeholder="🏁 終点地 (空欄で周回)">
+      <button class="btn btn-secondary" style="width: 105px;" onclick="setEndFromCenter()">中心セット</button>
+    </div>
+
+    <!-- アナウンス表示 -->
+    <div id="alert-box"></div>
+
+    <!-- 3. 計算ボタン -->
+    <div class="row">
+      <button class="btn btn-primary" onclick="calculateTspRoute()">🚀 最短ルート計算開始</button>
+    </div>
+
+    <!-- 4. 結果エリア -->
+    <div id="results" style="display: none;">
+      <h4 style="margin-bottom: 6px;">📄 並び替えデータ保存</h4>
+      <div class="row">
+        <button class="btn btn-success" onclick="exportData('xlsx')">📊 Excel を保存</button>
+        <button class="btn btn-success" onclick="exportData('csv')">📥 CSV を保存</button>
+      </div>
+
+      <h4 style="margin: 10px 0 6px 0;">🔗 Google Maps ナビ</h4>
+      <div id="urls-list"></div>
+    </div>
+  </div>
+
+  <!-- 地図表示エリア -->
+  <div id="map-container">
+    <div id="map"></div>
+    <div class="crosshair">✚</div>
+  </div>
+
+  <script>
+    // --- 状態管理 (LocalStorage完全連動) ---
+    let state = {
+      spots: [],
+      start: "35.96550, 140.29420",
+      end: "",
+      skipped_keys: [],
+      result: null
+    };
+
+    // --- Leaflet 地図初期化 ---
+    const map = L.map('map', { zoomControl: false }).setView([36.0, 140.0], 10);
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+    // ★ 国土地理院 標準地図（デフォルト・怒られない・爆速）
+    const gsiStd = L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '国土地理院'
+    }).addTo(map);
+
+    // ★ 国土地理院 航空写真
+    const gsiPhoto = L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg', {
+      maxZoom: 18,
+      attribution: '国土地理院'
+    });
+
+    // ★ 国土地理院 淡色地図
+    const gsiPale = L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '国土地理院'
+    });
+
+    L.control.layers({ "🗺️ 地理院地図": gsiStd, "📡 航空写真": gsiPhoto, "⚪ 淡色地図": gsiPale }, null, { position: 'topright' }).addTo(map);
+
+    // 地図上GPSボタン
+    const gpsControl = L.control({ position: 'topleft' });
+    gpsControl.onAdd = function() {
+      const container = L.DomUtil.create('div', 'leaflet-bar');
+      const btn = L.DomUtil.create('div', 'gps-btn-ctrl', container);
+      btn.innerHTML = '🎯';
+      btn.title = '現在地へ移動';
+      L.DomEvent.disableClickPropagation(container);
+      L.DomEvent.on(btn, 'click', function(e) {
+        L.DomEvent.stop(e);
+        getCurrentGps();
+      });
+      return container;
+    };
+    gpsControl.addTo(map);
+
+    let markersLayer = L.layerGroup().addTo(map);
+    let routeLayer = L.layerGroup().addTo(map);
+    let myLocMarker = null;
+
+    setTimeout(() => { map.invalidateSize(); }, 300);
+
+    // --- LocalStorage 永続化 ---
+    function saveState() {
+      try {
+        localStorage.setItem('field_tsp_standalone_v1', JSON.stringify(state));
+      } catch(e) {}
+    }
+
+    function loadState() {
+      try {
+        const raw = localStorage.getItem('field_tsp_standalone_v1');
+        if (raw) {
+          state = JSON.parse(raw);
+          document.getElementById('start-coord').value = state.start || '';
+          document.getElementById('end-coord').value = state.end || '';
+          renderMarkers();
+          if (state.result) renderResults(state.result);
+        }
+      } catch(e) {}
+    }
+
+    // --- 座標パーサー（スペース・カンマ・全角・逆転対応） ---
+    function parseLatLonPair(val1, val2) {
+      if (val1 === undefined || val1 === null || String(val1).trim() === '' || String(val1).toLowerCase() === 'nan') {
+        return [null, null];
+      }
+      let v1 = String(val1).trim();
+      let v2 = val2 !== undefined && val2 !== null ? String(val2).trim() : null;
+      let lat = null, lon = null;
+      
+      if (!v2 || v2.toLowerCase() === 'nan') {
+        const matches = v1.match(/[-+]?\d*\.?\d+/g);
+        if (!matches || matches.length < 2) return [null, null];
+        lat = parseFloat(matches[0]);
+        lon = parseFloat(matches[1]);
+      } else {
+        lat = parseFloat(v1);
+        lon = parseFloat(v2);
+      }
+      
+      if (isNaN(lat) || isNaN(lon)) return [null, null];
+      
+      // 日本国内の緯度・経度判定（経度120〜155、緯度20〜50）
+      if (lat >= 120 && lat <= 155 && lon >= 20 && lon <= 50) {
+        return [Number(lon.toFixed(5)), Number(lat.toFixed(5))];
+      }
+      return [Number(lat.toFixed(5)), Number(lon.toFixed(5))];
+    }
+
+    function parseCoordStr(str) {
+      if (!str) return null;
+      const parts = str.split(',').map(n => parseFloat(n.trim()));
+      return (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) ? { lat: parts[0], lon: parts[1] } : null;
+    }
+
+    // --- Excel / CSV / GeoJSON 読み込み部 (SheetJS) ---
+    document.getElementById('file-input').addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const alertBox = document.getElementById('alert-box');
+      alertBox.innerHTML = `<div class="alert">⏳ 「${file.name}」をローカル解析中...</div>`;
+
+      const reader = new FileReader();
+
+      if (file.name.endsWith('.geojson') || file.name.endsWith('.json')) {
+        reader.onload = function(evt) {
+          try {
+            const geojson = JSON.parse(evt.target.result);
+            const feats = geojson.type === 'FeatureCollection' ? geojson.features : [geojson];
+            const spots = [];
+            feats.forEach((f, i) => {
+              const geom = f.geometry || {};
+              const props = f.properties || {};
+              if (geom.type === 'Point' && geom.coordinates) {
+                spots.push({
+                  lat: Number(parseFloat(geom.coordinates[1]).toFixed(5)),
+                  lon: Number(parseFloat(geom.coordinates[0]).toFixed(5)),
+                  name: props.name || props.title || props.管理番号 || `地点_${i+1}`,
+                  raw: props
+                });
+              }
+            });
+            handleParsedSpots(spots, alertBox);
+          } catch(err) {
+            alertBox.innerHTML = `<div class="alert alert-error">❌ GeoJSON解析エラー: ${err.message}</div>`;
+          }
+        };
+        reader.readAsText(file);
+      } else {
+        // Excel または CSV
+        reader.onload = function(evt) {
+          try {
+            const data = new Uint8Array(evt.target.result);
+            const wb = XLSX.read(data, { type: 'array' });
+            const sheet = wb.Sheets[wb.SheetNames[0]];
+            const jsonRows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+
+            if (!jsonRows || jsonRows.length === 0) {
+              alertBox.innerHTML = `<div class="alert alert-error">❌ シートにデータが見つかりませんでした。</div>`;
+              return;
+            }
+
+            const header = Object.keys(jsonRows[0]);
+            let nameKey = header.find(k => /管理番号|名称|名前|name|id|スポット/i.test(k));
+            let latlonKey = header.find(k => /緯度経度|経度緯度|座標|latlon|location|coords/i.test(k));
+            let latKey = header.find(k => /緯度|lat|latitude/i.test(k));
+            let lonKey = header.find(k => /経度|lon|lng|longitude/i.test(k));
+
+            const spots = [];
+            jsonRows.forEach((row, idx) => {
+              let name = (nameKey && row[nameKey]) ? String(row[nameKey]).trim() : `地点_${idx + 1}`;
+              let lat = null, lon = null;
+
+              if (latlonKey && row[latlonKey]) {
+                [lat, lon] = parseLatLonPair(row[latlonKey]);
+              }
+              if ((lat === null || lon === null) && latKey && lonKey && row[latKey] && row[lonKey]) {
+                [lat, lon] = parseLatLonPair(row[latKey], row[lonKey]);
+              }
+              if (lat === null || lon === null) {
+                for (const k of Object.keys(row)) {
+                  const [tLat, tLon] = parseLatLonPair(row[k]);
+                  if (tLat !== null && tLon !== null) {
+                    lat = tLat; lon = tLon; break;
+                  }
+                }
+              }
+
+              if (lat !== null && lon !== null) {
+                spots.push({
+                  lat: lat,
+                  lon: lon,
+                  name: name,
+                  raw: row
+                });
+              }
+            });
+
+            handleParsedSpots(spots, alertBox);
+          } catch(err) {
+            alertBox.innerHTML = `<div class="alert alert-error">❌ ファイル解析エラー: ${err.message}</div>`;
+          }
+        };
+        reader.readAsArrayBuffer(file);
+      }
+    });
+
+    function handleParsedSpots(spots, alertBox) {
+      if (!spots || spots.length === 0) {
+        alertBox.innerHTML = `<div class="alert alert-error">❌ 有効な緯度経度データが見つかりませんでした。</div>`;
+        return;
+      }
+
+      state.spots = spots;
+      state.skipped_keys = [];
+      state.result = null;
+      saveState();
+      renderMarkers();
+
+      if (state.spots.length > 0) {
+        map.setView([state.spots[0].lat, state.spots[0].lon], 12);
+      }
+
+      alertBox.innerHTML = `<div class="alert alert-success">🎉 ${spots.length} 件の地点を正常に読み込みました！</div>`;
+    }
+
+    // --- マーカー描画 ＆ スルー切替 ---
+    function renderMarkers() {
+      markersLayer.clearLayers();
+      document.getElementById('spot-count').innerText = `地点: ${state.spots.length}件 (スルー: ${state.skipped_keys.length}件)`;
+
+      state.spots.forEach(s => {
+        const key = `${s.lat.toFixed(5)},${s.lon.toFixed(5)}`;
+        const isSkipped = state.skipped_keys.includes(key);
+
+        const marker = L.circleMarker([s.lat, s.lon], {
+          radius: 9,
+          fillColor: isSkipped ? "#757575" : "#1565c0",
+          color: "#ffffff",
+          weight: 2,
+          fillOpacity: 0.95
+        });
+
+        marker.bindPopup(`
+          <div style="font-size:13px; line-height:1.4;">
+            <b>${s.name}</b><br>
+            座標: ${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}<br>
+            ${isSkipped ? '<span style="color:#c62828; font-weight:bold;">🚫 スルー中 (タップで復活)</span>' : '<span style="color:#2e7d32; font-weight:bold;">📍 通常 (タップでスルー)</span>'}
+          </div>
+        `);
+
+        // ピンをタップで「通常 ↔ スルー」切替
+        marker.on('click', () => {
+          if (isSkipped) {
+            state.skipped_keys = state.skipped_keys.filter(k => k !== key);
+          } else {
+            state.skipped_keys.push(key);
+          }
+          saveState();
+          renderMarkers();
+        });
+
+        markersLayer.addLayer(marker);
+      });
+
+      // スタート・ゴールピン
+      const s = parseCoordStr(state.start);
+      if (s) {
+        L.circleMarker([s.lat, s.lon], { radius: 10, fillColor: "#d32f2f", color: "#fff", weight: 3, fillOpacity: 1 }).bindPopup("★ 出発地").addTo(markersLayer);
+      }
+      const e = parseCoordStr(state.end);
+      if (e) {
+        L.circleMarker([e.lat, e.lon], { radius: 10, fillColor: "#2e7d32", color: "#fff", weight: 3, fillOpacity: 1 }).bindPopup("🏁 終点地").addTo(markersLayer);
+      }
+    }
+
+    // --- 出発地・終点地セット ---
+    function setStartFromCenter() {
+      const c = map.getCenter();
+      state.start = `${c.lat.toFixed(5)}, ${c.lng.toFixed(5)}`;
+      document.getElementById('start-coord').value = state.start;
+      saveState();
+      renderMarkers();
+    }
+    
+    function setEndFromCenter() {
+      const c = map.getCenter();
+      state.end = `${c.lat.toFixed(5)}, ${c.lng.toFixed(5)}`;
+      document.getElementById('end-coord').value = state.end;
+      saveState();
+      renderMarkers();
+    }
+
+    async function searchAddress() {
+      const q = document.getElementById('search-query').value.trim();
+      if (!q) return;
+      try {
+        const url = `https://msearch.gsi.go.jp/address-search/AddressSearch?q=${encodeURIComponent(q)}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data && data.length > 0 && data[0].geometry) {
+          const coords = data[0].geometry.coordinates;
+          map.setView([coords[1], coords[0]], 16);
+        } else {
+          alert("住所が見つかりませんでした。");
+        }
+      } catch(e) {
+        alert("住所検索エラー: " + e.message);
+      }
+    }
+
+    function getCurrentGps() {
+      if (!navigator.geolocation) {
+        alert("お使いの環境ではGPS位置情報が利用できません。");
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+          map.setView([lat, lon], 16);
+          if (myLocMarker) map.removeLayer(myLocMarker);
+          myLocMarker = L.circleMarker([lat, lon], {
+            radius: 12, fillColor: "#0288d1", color: "#fff", weight: 3, fillOpacity: 1
+          }).bindPopup("📍 現在地").addTo(map).openPopup();
+          state.start = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+          document.getElementById('start-coord').value = state.start;
+          saveState();
+          renderMarkers();
+        },
+        (err) => {
+          alert("位置情報の取得に失敗しました。地図中心セットをご利用ください。");
+        },
+        { enableHighAccuracy: false, timeout: 8000 }
+      );
+    }
+
+    // --- 高速Haversine実距離計算 (JS完結) ---
+    function calcDist(p1, p2) {
+      const R = 6371000;
+      const dLat = (p2.lat - p1.lat) * Math.PI / 180;
+      const dLon = (p2.lon - p1.lon) * Math.PI / 180;
+      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(p1.lat * Math.PI / 180) * Math.cos(p2.lat * Math.PI / 180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+      return 2 * R * Math.asin(Math.sqrt(a));
+    }
+
+    // --- 最短巡回TSPソルバー (Nearest Neighbor + 2-opt) ---
+    function solveTsp(calcSpots, isRoundTrip) {
+      const n = calcSpots.length;
+      if (n <= 2) {
+        return isRoundTrip ? [...Array(n).keys(), 0] : [...Array(n).keys()];
+      }
+
+      // 距離マトリックス作成
+      const dist = Array.from({ length: n }, () => new Float64Array(n));
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          const d = calcDist(calcSpots[i], calcSpots[j]);
+          dist[i][j] = d;
+          dist[j][i] = d;
+        }
+      }
+
+      let tour = [0];
+      if (isRoundTrip) {
+        const unvisited = new Set();
+        for (let i = 1; i < n; i++) unvisited.add(i);
+        let curr = 0;
+        while (unvisited.size > 0) {
+          let nearest = -1;
+          let minD = Infinity;
+          for (let cand of unvisited) {
+            if (dist[curr][cand] < minD) {
+              minD = dist[curr][cand];
+              nearest = cand;
+            }
+          }
+          tour.push(nearest);
+          unvisited.delete(nearest);
+          curr = nearest;
+        }
+        tour.push(0);
+
+        // 2-opt 最適化ループ
+        let improved = true;
+        let count = 0;
+        while (improved && count < 5000) {
+          improved = false;
+          for (let i = 1; i < n - 1; i++) {
+            for (let j = i + 1; j < n; j++) {
+              const currCost = dist[tour[i - 1]][tour[i]] + dist[tour[j]][tour[j + 1]];
+              const newCost = dist[tour[i - 1]][tour[j]] + dist[tour[i]][tour[j + 1]];
+              if (newCost < currCost - 1e-3) {
+                const sub = tour.slice(i, j + 1).reverse();
+                tour.splice(i, sub.length, ...sub);
+                improved = true;
+                count++;
+                break;
+              }
+            }
+            if (improved) break;
+          }
+        }
+      } else {
+        // 片道（0スタート、n-1ゴール固定）
+        const unvisited = new Set();
+        for (let i = 1; i < n - 1; i++) unvisited.add(i);
+        let curr = 0;
+        while (unvisited.size > 0) {
+          let nearest = -1;
+          let minD = Infinity;
+          for (let cand of unvisited) {
+            if (dist[curr][cand] < minD) {
+              minD = dist[curr][cand];
+              nearest = cand;
+            }
+          }
+          tour.push(nearest);
+          unvisited.delete(nearest);
+          curr = nearest;
+        }
+        tour.push(n - 1);
+
+        let improved = true;
+        let count = 0;
+        while (improved && count < 5000) {
+          improved = false;
+          for (let i = 1; i < n - 2; i++) {
+            for (let j = i + 1; j < n - 1; j++) {
+              const currCost = dist[tour[i - 1]][tour[i]] + dist[tour[j]][tour[j + 1]];
+              const newCost = dist[tour[i - 1]][tour[j]] + dist[tour[i]][tour[j + 1]];
+              if (newCost < currCost - 1e-3) {
+                const sub = tour.slice(i, j + 1).reverse();
+                tour.splice(i, sub.length, ...sub);
+                improved = true;
+                count++;
+                break;
+              }
+            }
+            if (improved) break;
+          }
+        }
+      }
+      return tour;
+    }
+
+    // --- 最短ルート計算メイン ---
+    async function calculateTspRoute() {
+      const s = parseCoordStr(state.start);
+      if (!s) { alert("出発地を指定してください。"); return; }
+      if (!state.spots || state.spots.length === 0) {
+        alert("地点データがありません。先にExcelファイルを選択してください。"); return;
+      }
+      const e = parseCoordStr(state.end);
+
+      const alertBox = document.getElementById('alert-box');
+      alertBox.innerHTML = '<div class="alert">⏳ 最短ルートを計算中...</div>';
+
+      // 1. スルー地点の分離
+      const activeSpots = [];
+      const skippedSpots = [];
+      state.spots.forEach(sp => {
+        const key = `${sp.lat.toFixed(5)},${sp.lon.toFixed(5)}`;
+        if (state.skipped_keys.includes(key)) {
+          skippedSpots.push(sp);
+        } else {
+          activeSpots.push(sp);
+        }
+      });
+
+      // 2. 完全一致重複座標の検知＆除外
+      const seen = new Set([`${s.lat.toFixed(5)},${s.lon.toFixed(5)}`]);
+      const uniqueSpots = [];
+      const duplicates = [];
+
+      activeSpots.forEach(sp => {
+        const key = `${sp.lat.toFixed(5)},${sp.lon.toFixed(5)}`;
+        if (seen.has(key)) {
+          duplicates.push(sp);
+        } else {
+          seen.add(key);
+          uniqueSpots.push(sp);
+        }
+      });
+
+      if (uniqueSpots.length === 0) {
+        alertBox.innerHTML = '<div class="alert alert-error">❌ 有効な立ち寄り先がありません（すべてスルーまたは重複しています）。</div>';
+        return;
+      }
+
+      const isRoundTrip = !e;
+      const startSpot = { lat: s.lat, lon: s.lon, name: "指定された出発地", raw: {} };
+      let calcSpots = [startSpot, ...uniqueSpots];
+      if (!isRoundTrip) {
+        calcSpots.push({ lat: e.lat, lon: e.lon, name: "指定された終点地", raw: {} });
+      }
+
+      // 3. TSP計算実行
+      const tour = solveTsp(calcSpots, isRoundTrip);
+      const orderedSpots = tour.map(idx => calcSpots[idx]);
+
+      // 4. Google Maps URL生成 (10地点チャンク)
+      const urlsInfo = [];
+      const chunkSize = 10;
+      let part = 1;
+      let idx = 0;
+      while (idx < orderedSpots.length - 1) {
+        const endI = Math.min(idx + chunkSize, orderedSpots.length - 1);
+        const sub = orderedSpots.slice(idx, endI + 1);
+        const urlNorm = "https://www.google.com/maps/dir/" + sub.map(p => `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`).join('/');
+        const urlCurr = "https://www.google.com/maps/dir//" + sub.slice(1).map(p => `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`).join('/');
+        urlsInfo.push({
+          part: part,
+          count: sub.length - 1,
+          start: sub[0].name,
+          end: sub[sub.length - 1].name,
+          url: urlNorm,
+          current_loc_url: urlCurr
+        });
+        idx = endI;
+        part++;
+      }
+
+      state.result = {
+        tour: tour,
+        calcSpots: calcSpots,
+        orderedSpots: orderedSpots,
+        urlsInfo: urlsInfo,
+        duplicates: duplicates,
+        skippedSpots: skippedSpots,
+        isRoundTrip: isRoundTrip
+      };
+
+      saveState();
+      renderResults(state.result);
+
+      // 道路沿いルート線（OSRM経由、失敗時は直線点線フォールバック）
+      fetchRoadGeometry(orderedSpots);
+
+      let msg = `🎉 計算完了！訪問先: ${orderedSpots.length}件`;
+      if (duplicates.length > 0) msg += ` (⚠️重複除外: ${duplicates.length}件)`;
+      if (skippedSpots.length > 0) msg += ` (🚫スルー: ${skippedSpots.length}件)`;
+      alertBox.innerHTML = `<div class="alert alert-success">${msg}</div>`;
+    }
+
+    // --- 道路網ジオメトリ取得（OSRM/直線フォールバック） ---
+    async function fetchRoadGeometry(orderedSpots) {
+      routeLayer.clearLayers();
+      let drawn = false;
+      try {
+        const coordsStr = orderedSpots.map(s => `${s.lon.toFixed(5)},${s.lat.toFixed(5)}`).join(';');
+        const url = `https://router.project-osrm.org/route/v1/driving/${coordsStr}?overview=full&geometries=geojson&continue_straight=false`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.routes && data.routes.length > 0) {
+          const latlons = data.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+          L.polyline(latlons, { color: '#d32f2f', weight: 5, opacity: 0.85 }).addTo(routeLayer);
+          drawn = true;
+        }
+      } catch(e) {}
+
+      if (!drawn) {
+        // オフラインまたはエラー時は直線で安全に描画
+        const straightLatlons = orderedSpots.map(s => [s.lat, s.lon]);
+        L.polyline(straightLatlons, { color: '#d32f2f', weight: 4, opacity: 0.8, dashArray: '6, 6' }).addTo(routeLayer);
+      }
+    }
+
+    // --- 結果描画 ---
+    function renderResults(res) {
+      document.getElementById('results').style.display = 'block';
+      const container = document.getElementById('urls-list');
+      container.innerHTML = '';
+
+      res.urlsInfo.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'part-card';
+        div.innerHTML = `
+          <div style="font-weight:bold; margin-bottom:6px; font-size:14px;">Part ${item.part}: ${item.start} ➔ ${item.end} (${item.count}区間)</div>
+          <div class="row">
+            <a href="${item.url}" target="_blank" class="btn btn-secondary" style="text-align:center; text-decoration:none; padding:8px;">🚗 通常ルート</a>
+            <a href="${item.current_loc_url}" target="_blank" class="btn btn-primary" style="text-align:center; text-decoration:none; padding:8px;">📍 現在地から開始</a>
+          </div>
+        `;
+        container.appendChild(div);
+      });
+    }
+
+    // --- Excel / CSV 保存 (SheetJSでブラウザ完結ダウンロード) ---
+    function exportData(fmt) {
+      if (!state.result) return;
+      const res = state.result;
+      const rows = [];
+      const totalLen = res.tour.length;
+
+      res.tour.forEach((idx, order) => {
+        if (res.isRoundTrip && order === totalLen - 1) return;
+        const sp = res.calcSpots[idx];
+        const label = (order === 0) ? "出発地" : ((!res.isRoundTrip && order === totalLen - 1) ? "終点地" : `立ち寄り_${order}`);
+        const r = {
+          "訪問順": order,
+          "区分": label,
+          "名称/識別ID": sp.name,
+          "緯度": sp.lat,
+          "経度": sp.lon
+        };
+        Object.assign(r, sp.raw || {});
+        rows.push(r);
+      });
+
+      // スルー地点を末尾に「スルー_1」「スルー_2」として記録
+      (res.skippedSpots || []).forEach((sp, sIdx) => {
+        const r = {
+          "訪問順": "-",
+          "区分": `スルー_${sIdx + 1}`,
+          "名称/識別ID": sp.name,
+          "緯度": sp.lat,
+          "経度": sp.lon
+        };
+        Object.assign(r, sp.raw || {});
+        rows.push(r);
+      });
+
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "最適ルート一覧");
+
+      if (fmt === 'csv') {
+        XLSX.writeFile(wb, "optimized_route.csv", { bookType: 'csv' });
+      } else {
+        XLSX.writeFile(wb, "optimized_route.xlsx", { bookType: 'xlsx' });
+      }
+    }
+
+    // 起動時にLocalStorageから即座に復元
+    loadState();
+  </script>
+</body>
+</html>
